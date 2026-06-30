@@ -1198,24 +1198,24 @@ async function buildCasePlan(id) {
 
 async function importPlanTasks() {
   if (!_planCaseId || !_planMarkdown) return;
-  // Extract checkbox/list items from markdown as tasks
   const lines = _planMarkdown.split('\\n');
   const tasks = [];
   for (const line of lines) {
-    const m = line.match(/^[-*]\\s+(?:\\[[ x]\\]\\s+)?(.+)$/i);
+    // Match numbered "1. Item", bullets "- Item" / "* Item", checkboxes "- [ ] Item"
+    const m = line.match(/^\\s*(?:\\d+\\.|[-*•])\\s+(?:\\[[ x✓]\\]\\s+)?(.+)$/i);
     if (m) {
-      const title = m[1].replace(/\*\*/g,'').trim();
-      if (title.length > 4 && title.length < 200) tasks.push(title);
+      const title = m[1].replace(/\\*\\*/g,'').replace(/\\*$/,'').replace(/^#+\\s*/,'').trim();
+      if (title.length > 3 && title.length < 250) tasks.push(title);
     }
   }
   if (!tasks.length) { alert('No checklist items found to import.'); return; }
-  let added = 0;
+  const btn = document.querySelector('#plan-actions button');
+  if (btn) { btn.disabled=true; btn.textContent='Importing…'; }
   for (const title of tasks) {
     await fetch('/api/cases/'+_planCaseId+'/tasks', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ title, category:'action' })
     });
-    added++;
   }
   closePlanModal();
   loadCaseDetail(_planCaseId);
