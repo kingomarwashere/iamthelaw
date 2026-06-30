@@ -521,8 +521,21 @@ const HTML = `<!DOCTYPE html>
     <div style="font-size:11px;color:var(--t3)">Your cases. Your fight.</div>
     <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
       <button class="bp" style="font-size:11px;padding:5px 12px;letter-spacing:.05em" onclick="showAddCase()">+ New Case</button>
-      <button class="bg" style="font-size:11px;padding:5px 12px;background:var(--pdim);border-color:var(--purple);color:var(--purple)" onclick="syncRegistry()" id="btn-registry-sync">⟳ Sync Registry</button>
-      <div id="registry-sync-status" style="font-size:10px;color:var(--t3)"></div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <div id="reg-badge" style="display:flex;align-items:center;gap:5px;background:var(--s3);border:1px solid var(--bd);border-radius:20px;padding:3px 10px;font-size:10px;letter-spacing:.05em;white-space:nowrap">
+          <span id="reg-dot" style="width:6px;height:6px;border-radius:50%;background:var(--t3);flex-shrink:0;transition:background .3s"></span>
+          <span id="reg-badge-text" style="color:var(--t3)">Not connected</span>
+        </div>
+        <button class="bg" style="font-size:11px;padding:5px 12px;background:var(--pdim);border-color:var(--purple);color:var(--purple)" onclick="syncRegistry()" id="btn-registry-sync">⟳ Sync Registry</button>
+      </div>
+      <div id="registry-sync-status" style="font-size:10px;color:var(--t3);margin-top:4px"></div>
+      <div id="reg-2fa-box" style="display:none;margin-top:8px;display:none;align-items:center;gap:6px">
+        <span style="font-size:11px;color:var(--amber)">2FA code:</span>
+        <input id="reg-2fa-input" type="text" inputmode="numeric" maxlength="8" placeholder="000000"
+          style="width:90px;background:var(--bg);border:1px solid var(--amber);color:var(--text);padding:4px 8px;border-radius:5px;font-family:'Roboto Mono',monospace;font-size:12px;outline:none;letter-spacing:.15em">
+        <button onclick="submit2FA()" style="background:var(--amber);color:#000;border:none;border-radius:5px;padding:4px 12px;font-size:11px;font-weight:700;font-family:inherit;cursor:pointer;letter-spacing:.05em">Submit</button>
+        <button onclick="cancel2FA()" style="background:none;border:1px solid var(--bd2);color:var(--t2);border-radius:5px;padding:4px 10px;font-size:11px;font-family:inherit;cursor:pointer">Cancel</button>
+      </div>
       <button class="bg" style="font-size:11px;padding:5px 10px" onclick="switchTab('search')">✕ Close</button>
     </div>
   </div>
@@ -626,6 +639,7 @@ function switchTab(t) {
   if (t==='mycases') {
     $('rpanel').classList.remove('open'); rpOpen=false;
     loadWarRoom();
+    checkRegistryStatus();
   }
 }
 
@@ -898,101 +912,156 @@ async function searchCaselaw(){
   </div>\`).join('')+'</div>';
 }
 
+// ── NSW Registry status badge ──────────────────────────────────────────────────
+function setRegBadge(state, text) {
+  const dot=$('reg-dot'), label=$('reg-badge-text');
+  const colors={connected:'var(--green)',connecting:'var(--amber)',error:'var(--red)',off:'var(--t3)'};
+  dot.style.background = colors[state]||colors.off;
+  label.style.color     = colors[state]||colors.off;
+  label.textContent     = text;
+  if(state==='connecting') { dot.style.animation='blink 1.2s ease-in-out infinite'; }
+  else { dot.style.animation='none'; }
+}
+function setRegStatus(text, color='var(--t3)') {
+  const el=$('registry-sync-status');
+  el.textContent=text; el.style.color=color;
+}
+async function checkRegistryStatus() {
+  try {
+    const d = await (await fetch('/api/registry/status')).json();
+    if (d.error) { setRegBadge('off','Not connected'); return; }
+    if (d.loggedIn) { setRegBadge('connected','Connected'); }
+    else            { setRegBadge('off','Not connected'); }
+  } catch(e) { setRegBadge('off','Not connected'); }
+}
+
+// ── 2FA inline handling ────────────────────────────────────────────────────────
+let _syncResolve2FA = null;
+function show2FABox() {
+  const box=$('reg-2fa-box');
+  box.style.display='flex';
+  $('reg-2fa-input').value='';
+  $('reg-2fa-input').focus();
+  return new Promise(resolve => { _syncResolve2FA = resolve; });
+}
+function submit2FA() {
+  const code = $('reg-2fa-input').value.trim();
+  if (!code) return;
+  $('reg-2fa-box').style.display='none';
+  if (_syncResolve2FA) { _syncResolve2FA(code); _syncResolve2FA=null; }
+}
+function cancel2FA() {
+  $('reg-2fa-box').style.display='none';
+  if (_syncResolve2FA) { _syncResolve2FA(null); _syncResolve2FA=null; }
+}
+// Allow Enter key in 2FA input
+document.addEventListener('keydown', e => {
+  if (e.key==='Enter' && $('reg-2fa-box')?.style.display==='flex') submit2FA();
+});
+
 // ── NSW Registry sync ─────────────────────────────────────────────────────────
 async function syncRegistry(){
-  const btn=$('btn-registry-sync'), st=$('registry-sync-status');
-  btn.disabled=true; btn.textContent='Syncing…'; st.textContent=''; st.style.color='var(--t3)';
+  const btn=$('btn-registry-sync');
+  btn.disabled=true; btn.textContent='Syncing…';
+  setRegStatus('');
 
-  // Prompt for party name if not configured
   let partyName = '';
   try {
     const ms = await (await fetch('/api/models')).json();
     partyName = ms.keys.registry_name || '';
     if (!ms.keys.registry_user || !ms.keys.registry_pass) {
-      st.style.color='var(--amber)'; st.textContent='Add Registry login in ⚙ Settings first';
+      setRegBadge('error','No credentials');
+      setRegStatus('Add Registry login in ⚙ Settings first','var(--amber)');
       btn.disabled=false; btn.textContent='⟳ Sync Registry'; return;
     }
     if (!partyName) {
-      partyName = prompt('Enter your full legal name as it appears in court documents (e.g. SMITH JOHN):') || '';
+      partyName = prompt('Enter your full legal name as shown in court documents (e.g. SMITH JOHN):') || '';
       if (!partyName.trim()) { btn.disabled=false; btn.textContent='⟳ Sync Registry'; return; }
     }
-  } catch(e) { st.style.color='var(--red)'; st.textContent='Error: '+e.message; btn.disabled=false; btn.textContent='⟳ Sync Registry'; return; }
+  } catch(e) {
+    setRegBadge('error','Error'); setRegStatus('Error: '+e.message,'var(--red)');
+    btn.disabled=false; btn.textContent='⟳ Sync Registry'; return;
+  }
 
   try {
-    st.textContent='Logging in to NSW Registry…';
-    // Pre-login so we can handle 2FA before the sync
+    setRegBadge('connecting','Logging in…');
+    setRegStatus('Connecting to NSW Registry…','var(--amber)');
     const keys2 = await (await fetch('/api/models')).json();
     const loginR = await fetch('/api/registry/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:keys2.keys.registry_user, password:keys2.keys.registry_pass})});
     const loginD = await loginR.json();
+
     if (loginD.needs_2fa) {
-      st.style.color='var(--amber)'; st.textContent='2FA required…';
-      const code = prompt('NSW Registry sent you a verification code.\\nEnter it here:');
-      if (!code) { btn.disabled=false; btn.textContent='⟳ Sync Registry'; st.textContent='Cancelled.'; return; }
+      setRegBadge('connecting','2FA required');
+      setRegStatus('Check your phone/email for a verification code','var(--amber)');
+      const code = await show2FABox();
+      if (!code) {
+        setRegBadge('off','Not connected'); setRegStatus('Cancelled.','var(--t3)');
+        btn.disabled=false; btn.textContent='⟳ Sync Registry'; return;
+      }
+      setRegBadge('connecting','Verifying…'); setRegStatus('Submitting 2FA code…','var(--amber)');
       const r2fa = await fetch('/api/registry/2fa', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code})});
       const d2fa = await r2fa.json();
-      if (!d2fa.ok) { st.style.color='var(--red)'; st.textContent='2FA error: '+(d2fa.error||'failed'); btn.disabled=false; btn.textContent='⟳ Sync Registry'; return; }
-      st.textContent='2FA accepted. Fetching cases…';
+      if (!d2fa.ok) {
+        setRegBadge('error','2FA failed'); setRegStatus('2FA error: '+(d2fa.error||'failed'),'var(--red)');
+        btn.disabled=false; btn.textContent='⟳ Sync Registry'; return;
+      }
+      setRegStatus('2FA accepted. Fetching cases…','var(--amber)');
     } else if (!loginD.ok) {
-      st.style.color='var(--red)'; st.textContent='Login error: '+(loginD.error||'failed');
+      setRegBadge('error','Login failed');
+      setRegStatus('Login error: '+(loginD.error||'failed'),'var(--red)');
       if (loginD.log) console.log('[Registry login log]', loginD.log);
       if (loginD.screenshot) { console.log('[Registry screenshot]', loginD.screenshot.slice(0,80)+'…'); window.open('/api/registry/debug','_blank'); }
       btn.disabled=false; btn.textContent='⟳ Sync Registry'; return;
-    } else { st.textContent='Logged in. Fetching cases…'; }
+    } else {
+      setRegBadge('connected','Connected');
+      setRegStatus('Logged in. Fetching cases…','var(--amber)');
+    }
 
     const r = await fetch('/api/registry/sync', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({partyName})});
     const d = await r.json();
 
     if (!d.ok) {
-      st.style.color='var(--red)'; st.textContent='Error: '+(d.error||'Unknown error');
-      // Show debug nav links if available
-      if (d.debug?.navLinks?.length) {
-        console.log('[Registry] Nav links found after login:', d.debug.navLinks);
-        st.textContent += ' (check console for nav links)';
-      }
+      setRegBadge('error','Sync failed');
+      setRegStatus('Error: '+(d.error||'Unknown error'),'var(--red)');
+      if (d.debug?.navLinks?.length) console.log('[Registry] Nav links found after login:', d.debug.navLinks);
       btn.disabled=false; btn.textContent='⟳ Sync Registry'; return;
     }
 
     const cases = d.cases || [];
     if (!cases.length) {
-      st.style.color='var(--amber)';
-      st.textContent = d.message || 'No cases found for "'+partyName+'"';
-      if (d.rawText) { console.log('[Registry] Raw page text:', d.rawText); st.textContent += ' (see console)'; }
+      setRegBadge('connected','Connected — 0 cases');
+      setRegStatus((d.message || 'No cases found for "'+partyName+'"'),'var(--amber)');
+      if (d.rawText) console.log('[Registry] Raw page text:', d.rawText);
       btn.disabled=false; btn.textContent='⟳ Sync Registry'; return;
     }
 
-    // Import cases that don't already exist (match by matter number)
     const existing = await (await fetch('/api/cases')).json();
     const existingNums = new Set(existing.map(c=>c.matter_number).filter(Boolean));
     let added=0, skipped=0;
-
     for (const rc of cases) {
       const mn = (rc.matter_number||'').trim();
       if (mn && existingNums.has(mn)) { skipped++; continue; }
-      // Map registry fields to our case format
       const notes = [
         rc.next_time ? 'Hearing time: '+rc.next_time : '',
         rc.filed_date ? 'Filed: '+rc.filed_date : '',
         rc.detail_url ? 'Registry: '+rc.detail_url : '',
       ].filter(Boolean).join('\\n');
-      const newCase = {
+      await fetch('/api/cases', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({
         title:         rc.title || rc.matter_number || 'Registry Case',
         court:         rc.court || 'NSW Local/District/Supreme Court',
         matter_number: rc.matter_number || '',
         status:        mapRegistryStatus(rc.status),
         next_date:     parseRegistryDate(rc.next_date),
-        notes,
-        jurisdiction:  'nsw',
-        area_of_law:   'criminal',
-      };
-      await fetch('/api/cases', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(newCase)});
+        notes, jurisdiction:'nsw', area_of_law:'criminal',
+      })});
       added++;
     }
 
-    st.style.color='var(--green)';
-    st.textContent=\`✓ Synced: \${added} added, \${skipped} already existed\`;
-    await loadWarRoom(); // refresh case list
+    setRegBadge('connected',\`Connected · \${cases.length} case\${cases.length!==1?'s':''}\`);
+    setRegStatus(\`✓ Synced: \${added} added, \${skipped} already existed\`,'var(--green)');
+    await loadWarRoom();
   } catch(e) {
-    st.style.color='var(--red)'; st.textContent='Error: '+e.message;
+    setRegBadge('error','Error'); setRegStatus('Error: '+e.message,'var(--red)');
   }
   btn.disabled=false; btn.textContent='⟳ Sync Registry';
 }
@@ -2099,6 +2168,10 @@ const server = createServer(async (req, res) => {
   if (docDel && req.method==='DELETE') { deleteDocument(parseInt(docDel[2],10)); return jres(res,{ok:true}); }
 
   // ── NSW Registry ──
+  if (path==='/api/registry/status') {
+    const state = await getRegistryDebugState();
+    return jres(res, { loggedIn: state.loggedIn || false, url: state.url || '', error: state.error || null });
+  }
   if (path==='/api/registry/debug') {
     const state = await getRegistryDebugState();
     // Serve a debug page with the screenshot + state
