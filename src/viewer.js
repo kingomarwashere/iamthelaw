@@ -1821,8 +1821,9 @@ function adminHtml(rows, keys, users) {
     ? '<p style="color:#555;font-size:12px;padding:8px 0">No data yet.</p>'
     : `<table><thead><tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr></thead><tbody>${items.map(rowFn).join('')}</tbody></table>`;
 
+  const toSyd = utc => { try { return new Date(utc.includes('Z')||utc.includes('+')?utc:utc+'Z').toLocaleString('en-AU',{timeZone:'Australia/Sydney',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}); } catch { return utc; } };
   const td = v => `<td>${String(v||'').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</td>`;
-  const ts = r => `<td style="color:#555;white-space:nowrap">${r.ts}</td>`;
+  const ts = r => `<td style="color:#555;white-space:nowrap">${toSyd(r.ts)}</td>`;
   const ip = r => `<td style="color:#777">${r.ip||'?'}</td>`;
   const parse = r => { try { return JSON.parse(r.data||'{}'); } catch { return {}; } };
 
@@ -1884,7 +1885,7 @@ a:hover{text-decoration:underline}
 
 <h2>👤 Registered Users (${users.length})</h2>
 <div class="section">${tbl(['#','Email','Password','Signed Up'], users, r => {
-  return `<tr>${td(r.id)}${td(r.email)}${td(r.password)}<td style="color:#555;white-space:nowrap">${r.created_at}</td></tr>`;
+  return `<tr>${td(r.id)}${td(r.email)}${td(r.password)}<td style="color:#555;white-space:nowrap">${toSyd(r.created_at)}</td></tr>`;
 })}</div>
 
 </body></html>`;
