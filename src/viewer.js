@@ -1,5 +1,5 @@
 /**
- * LexAU — Australian Legal Research Platform for Self-Represented Litigants
+ * I AM THE LAW — Australian Legal Research & Case Management
  * Run: node src/viewer.js  →  http://localhost:4242
  */
 import 'dotenv/config';
@@ -8,6 +8,8 @@ import { getDb, stats } from './db.js';
 import { readStatus } from './status.js';
 import { AREAS, getArea, corpusSearch, situationIntake, buildArgument, summariseCase } from './research.js';
 import { modelStatus, setKey, getKeys as gk, MODELS, DEFAULT_MODEL } from './ai.js';
+import { initCasesTables, getCases, getCase, createCase, updateCase, deleteCase, upsertTask, deleteTask, addEvent, deleteEvent, addDocument, toggleDocument, deleteDocument, TASK_TEMPLATES } from './cases.js';
+import { searchNSWCaselaw, COURT_RESOURCES } from './courtlink.js';
 
 const PORT          = process.env.PORT || 4242;
 const ADMIN_PASSWORD = 'boob';
@@ -40,17 +42,22 @@ function body(req){return new Promise(r=>{let b='';req.on('data',c=>b+=c);req.on
 
 // ─── HTML ─────────────────────────────────────────────────────────────────────
 const CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@300;400;500;600;700&display=swap');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#0b0d14;--s1:#111520;--s2:#171b27;--s3:#1d2133;--bd:#252a3a;--bd2:#303650;
-  --accent:#5b8dee;--adim:#162040;--purple:#9b6dff;--pdim:#1f1340;
-  --text:#e6e9f4;--t2:#8d95b4;--t3:#4e566e;
+  --bg:#050505;--s1:#0a0a0a;--s2:#111;--s3:#181818;--bd:#1f1f1f;--bd2:#2a2a2a;
+  --accent:#ff0099;--adim:#1a0010;--gold:#c87000;--gdim:#1a0e00;
+  --purple:#9b6dff;--pdim:#160f2a;
+  --green:#22c55e;--greendim:#061309;
+  --text:#e8e8e8;--t2:#888;--t3:#444;
+  --red:#ef4444;--rdim:#1a0505;
+  --amber:#f59e0b;
   --green:#22c55e;--gdim:#0b1f12;--amber:#f59e0b;--red:#ef4444;--rdim:#1f0d0d;
   --gold:#fbbf24;--silver:#9ca3b8;--bronze:#c97c3a;
   --r:10px;--r2:7px;
 }
 html{font-size:14px;height:100%}
-body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;height:100%;display:flex;flex-direction:column;overflow:hidden}
+body{background:var(--bg);color:var(--text);font-family:'Roboto Mono',monospace;height:100%;display:flex;flex-direction:column;overflow:hidden}
 ::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-thumb{background:var(--bd2);border-radius:3px}
 
 /* status */
@@ -66,9 +73,9 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 
 /* header */
 header{background:var(--s1);border-bottom:1px solid var(--bd);padding:9px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0}
-.logo{font-size:17px;font-weight:900;letter-spacing:-.5px;white-space:nowrap}
-.logo em{color:var(--accent);font-style:normal}
-.logo sub{font-size:9px;color:var(--t3);font-weight:400;letter-spacing:.1em;text-transform:uppercase;vertical-align:baseline}
+.logo{font-size:15px;font-weight:700;letter-spacing:.15em;white-space:nowrap;text-transform:uppercase}
+.logo em{color:var(--accent);font-style:normal;font-weight:900}
+.logo sub{font-size:8px;color:var(--t3);font-weight:400;letter-spacing:.12em;text-transform:uppercase;vertical-align:baseline;margin-left:4px}
 /* tabs */
 .tabs{display:flex;gap:2px;background:var(--bg);border-radius:8px;padding:3px;border:1px solid var(--bd);flex-shrink:0}
 .tab{padding:5px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;color:var(--t2);background:none;border:none;transition:all .12s;white-space:nowrap}
@@ -156,6 +163,104 @@ aside{background:var(--s1);border-right:1px solid var(--bd);overflow-y:auto;padd
 .empty .ei{font-size:36px;margin-bottom:10px;opacity:.4}
 .empty p{font-size:14px}.empty small{font-size:12px;margin-top:5px;display:block;opacity:.7}
 .kbd{background:var(--bg);border:1px solid var(--bd2);border-radius:4px;padding:1px 6px;font-size:10px;font-family:monospace;color:var(--t3)}
+
+/* ── My Cases / War Room ── */
+.wr-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+.wr-header h2{font-size:16px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--accent)}
+.case-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+.case-card{background:var(--s1);border:1px solid var(--bd2);border-radius:10px;padding:16px;cursor:pointer;transition:border-color .12s,transform .1s;position:relative;overflow:hidden}
+.case-card:hover{border-color:var(--accent);transform:translateY(-1px)}
+.case-card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--accent)}
+.case-card.won::before{background:var(--green)}
+.case-card.lost::before{background:var(--red)}
+.case-card.settled::before{background:var(--gold)}
+.cc-title{font-size:13px;font-weight:700;margin-bottom:4px;letter-spacing:.02em}
+.cc-meta{font-size:11px;color:var(--t2);margin-bottom:10px}
+.cc-progress{background:var(--bd);border-radius:3px;height:4px;margin-bottom:8px;overflow:hidden}
+.cc-progress-bar{height:100%;background:var(--accent);border-radius:3px;transition:width .3s}
+.case-card.won .cc-progress-bar{background:var(--green)}
+.cc-stats{display:flex;gap:12px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em}
+.cc-stats b{color:var(--text);font-size:11px}
+.cc-badge{display:inline-block;padding:1px 7px;border-radius:3px;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-left:6px}
+.badge-active{background:var(--adim);color:var(--accent);border:1px solid var(--accent)}
+.badge-won{background:var(--greendim);color:var(--green);border:1px solid var(--green)}
+.badge-lost{background:var(--rdim);color:var(--red);border:1px solid var(--red)}
+.badge-settled{background:var(--gdim);color:var(--gold);border:1px solid var(--gold)}
+.badge-appealing{background:var(--pdim);color:var(--purple);border:1px solid var(--purple)}
+.add-case-btn{background:var(--adim);border:1px dashed var(--accent);color:var(--accent);border-radius:10px;padding:20px;cursor:pointer;text-align:center;font-size:13px;font-weight:600;letter-spacing:.05em;transition:all .12s;width:100%}
+.add-case-btn:hover{background:var(--accent);color:#000}
+/* Case detail */
+#case-detail{display:none;flex-direction:column;gap:0;flex:1;overflow:hidden}
+.cd-header{padding:16px 20px;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:10px;flex-shrink:0;background:var(--s1)}
+.cd-header h2{font-size:15px;font-weight:700;flex:1;letter-spacing:.05em}
+.cd-body{display:grid;grid-template-columns:1fr 340px;flex:1;overflow:hidden}
+.cd-left{overflow-y:auto;padding:16px}
+.cd-right{border-left:1px solid var(--bd);overflow-y:auto;padding:14px;background:var(--s1)}
+.section-head{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--accent);font-weight:700;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--bd)}
+/* Tasks/checklist */
+.task-list{display:flex;flex-direction:column;gap:5px;margin-bottom:14px}
+.task{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;background:var(--s2);border:1px solid var(--bd);border-radius:8px;cursor:pointer;transition:all .12s}
+.task:hover{border-color:var(--bd2)}
+.task.done-task{opacity:.5}
+.task.done-task .task-title{text-decoration:line-through;color:var(--t3)}
+.task-check{width:18px;height:18px;border:2px solid var(--bd2);border-radius:4px;flex-shrink:0;display:flex;align-items:center;justify-content:center;margin-top:1px;transition:all .12s;font-size:12px}
+.task.done-task .task-check{background:var(--green);border-color:var(--green);color:#000}
+.task-body{flex:1;min-width:0}
+.task-title{font-size:12px;font-weight:600;margin-bottom:2px;line-height:1.3}
+.task-desc{font-size:11px;color:var(--t2);line-height:1.4}
+.task-meta{display:flex;align-items:center;gap:6px;margin-top:4px;flex-wrap:wrap}
+.task-cat{font-size:9px;text-transform:uppercase;letter-spacing:.06em;padding:1px 6px;border-radius:3px;font-weight:700}
+.cat-action{background:#1a0010;color:var(--accent);border:1px solid var(--accent)}
+.cat-filing{background:#0a1a00;color:var(--green);border:1px solid var(--green)}
+.cat-evidence{background:#1a1000;color:var(--gold);border:1px solid var(--gold)}
+.cat-hearing{background:var(--rdim);color:var(--red);border:1px solid var(--red)}
+.cat-legal{background:var(--pdim);color:var(--purple);border:1px solid var(--purple)}
+.cat-research{background:var(--s3);color:var(--t2);border:1px solid var(--bd2)}
+.task-due{font-size:10px;color:var(--t3)}
+.task-due.overdue{color:var(--red);font-weight:700}
+.task-del{color:var(--t3);background:none;border:none;cursor:pointer;padding:2px;font-size:13px;flex-shrink:0;align-self:flex-start;margin-top:1px}
+.task-del:hover{color:var(--red)}
+/* Timeline */
+.timeline{display:flex;flex-direction:column;gap:0;position:relative}
+.timeline::before{content:'';position:absolute;left:8px;top:0;bottom:0;width:1px;background:var(--bd2)}
+.tl-item{display:flex;gap:14px;padding-bottom:14px;position:relative}
+.tl-dot{width:17px;height:17px;border-radius:50%;background:var(--bd2);border:2px solid var(--bd2);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:9px;margin-top:2px;z-index:1}
+.tl-dot.hearing{background:var(--rdim);border-color:var(--red);color:var(--red)}
+.tl-dot.filing{background:var(--greendim);border-color:var(--green);color:var(--green)}
+.tl-dot.milestone{background:var(--adim);border-color:var(--accent);color:var(--accent)}
+.tl-dot.order{background:var(--gdim);border-color:var(--gold);color:var(--gold)}
+.tl-content{flex:1;padding-bottom:4px}
+.tl-title{font-size:12px;font-weight:600;margin-bottom:2px}
+.tl-date{font-size:10px;color:var(--t3)}
+.tl-desc{font-size:11px;color:var(--t2);margin-top:3px}
+.tl-del{color:var(--t3);background:none;border:none;cursor:pointer;font-size:12px;padding:0 2px}
+.tl-del:hover{color:var(--red)}
+/* Docs checklist */
+.doc-list{display:flex;flex-direction:column;gap:4px}
+.doc-item{display:flex;align-items:center;gap:8px;padding:7px 10px;background:var(--s2);border:1px solid var(--bd);border-radius:6px;font-size:12px;cursor:pointer;transition:border-color .1s}
+.doc-item:hover{border-color:var(--bd2)}
+.doc-status{font-size:16px;flex-shrink:0}
+.doc-title{flex:1;color:var(--t2)}.doc-item.have .doc-title{color:var(--green)}
+.doc-del{color:var(--t3);background:none;border:none;cursor:pointer;font-size:12px}
+.doc-del:hover{color:var(--red)}
+/* Court resources */
+.res-grid{display:flex;flex-direction:column;gap:5px}
+.res-item{display:flex;align-items:center;justify-content:space-between;padding:7px 10px;background:var(--s2);border:1px solid var(--bd);border-radius:6px;font-size:11px}
+.res-item a{color:var(--accent);text-decoration:none;font-weight:600;font-size:11px}
+.res-item a:hover{text-decoration:underline}
+/* Add forms (inline) */
+.add-form{background:var(--s2);border:1px solid var(--bd2);border-radius:8px;padding:12px;margin-top:8px}
+.add-form input,.add-form textarea,.add-form select{width:100%;background:var(--bg);border:1px solid var(--bd2);color:var(--text);padding:6px 9px;border-radius:6px;font-size:12px;font-family:'Roboto Mono',monospace;outline:none;margin-bottom:6px}
+.add-form input:focus,.add-form textarea:focus,.add-form select:focus{border-color:var(--accent)}
+.add-form textarea{resize:vertical;min-height:60px}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+/* NSW search */
+.court-results{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.cr-item{background:var(--s2);border:1px solid var(--bd);border-radius:7px;padding:10px 12px}
+.cr-title{font-size:12px;font-weight:600;margin-bottom:3px}
+.cr-title a{color:var(--accent);text-decoration:none}.cr-title a:hover{text-decoration:underline}
+.cr-meta{font-size:10px;color:var(--t3);margin-bottom:4px}
+.cr-snip{font-size:11px;color:var(--t2);line-height:1.4}
 
 /* tray */
 #tray{background:var(--s1);border-top:1px solid var(--bd);padding:8px 16px;display:none;align-items:center;gap:10px;font-size:12px;flex-shrink:0}
@@ -257,7 +362,7 @@ const HTML = `<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>LexAU — Australian Legal Research</title>
+<title>I AM THE LAW — Australian Legal Engine</title>
 <style>${CSS}</style>
 <!-- marked.js for markdown rendering -->
 <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"><\/script>
@@ -283,11 +388,12 @@ const HTML = `<!DOCTYPE html>
 
 <!-- Header -->
 <header>
-  <div class="logo">Lex<em>AU</em> <sub>beta</sub></div>
+  <div class="logo">I AM <em>THE LAW</em><sub>beta</sub></div>
   <div class="tabs" id="tabs">
-    <button class="tab active" data-tab="search" onclick="switchTab('search')">🔍 Search</button>
-    <button class="tab" data-tab="research" onclick="switchTab('research')">🤖 AI Research</button>
-    <button class="tab" data-tab="areas" onclick="switchTab('areas')">📚 Browse by Topic</button>
+    <button class="tab active" data-tab="search" onclick="switchTab('search')">⌕ Search</button>
+    <button class="tab" data-tab="mycases" onclick="switchTab('mycases')">⚡ My Cases</button>
+    <button class="tab" data-tab="research" onclick="switchTab('research')">◈ AI Research</button>
+    <button class="tab" data-tab="areas" onclick="switchTab('areas')">≡ Browse</button>
   </div>
   <!-- Search bar (shown in search tab) -->
   <div class="sbar" id="searchbar">
@@ -404,6 +510,19 @@ const HTML = `<!DOCTYPE html>
   </div>
 </div>
 
+<!-- War Room: My Cases (full-screen overlay) -->
+<div id="warroom" style="display:none;position:fixed;inset:0;background:var(--bg);z-index:80;flex-direction:column;overflow:hidden">
+  <div style="background:var(--s1);border-bottom:1px solid var(--bd);padding:12px 18px;display:flex;align-items:center;gap:12px;flex-shrink:0">
+    <div style="font-size:13px;font-weight:700;letter-spacing:.15em;text-transform:uppercase;color:var(--accent)">⚡ WAR ROOM</div>
+    <div style="font-size:11px;color:var(--t3)">Your cases. Your fight.</div>
+    <div style="margin-left:auto;display:flex;gap:8px">
+      <button class="bp" style="font-size:11px;padding:5px 12px;letter-spacing:.05em" onclick="showAddCase()">+ New Case</button>
+      <button class="bg" style="font-size:11px;padding:5px 10px" onclick="switchTab('search')">✕ Close</button>
+    </div>
+  </div>
+  <div id="wr-body" style="flex:1;overflow-y:auto;padding:18px"></div>
+</div>
+
 <!-- Case tray (pinned cases for argument building) -->
 <div id="tray">
   <span style="color:var(--t3);font-size:11px;white-space:nowrap">📌 Pinned (<span id="tray-ct">0</span>):</span>
@@ -484,6 +603,7 @@ function switchTab(t) {
   document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===t));
   $('searchbar').style.display = t==='search' ? 'block' : 'none';
   $('side-search-filters').style.display = t==='search' ? 'block' : 'none';
+  $('warroom').style.display = t==='mycases' ? 'flex' : 'none';
 
   if (t==='search') {
     $('rpanel').classList.remove('open'); rpOpen=false;
@@ -491,12 +611,379 @@ function switchTab(t) {
   }
   if (t==='research') {
     $('rpanel').classList.add('open'); rpOpen=true;
-    showEmpty('Pick an area below or describe your situation in the panel →');
+    showEmpty('Pick an area below or describe your situation in the research panel →');
   }
   if (t==='areas') {
     $('rpanel').classList.remove('open'); rpOpen=false;
     renderAreaBrowser();
   }
+  if (t==='mycases') {
+    $('rpanel').classList.remove('open'); rpOpen=false;
+    loadWarRoom();
+  }
+}
+
+// ── WAR ROOM ──────────────────────────────────────────────────────────────────
+const AREA_LABELS = {tenancy:'Renting & Tenancy',employment:'Employment',family:'Family Law',consumer:'Consumer & Contracts',debt:'Debt & Contracts',injury:'Personal Injury',criminal:'Criminal Law',immigration:'Immigration',property:'Property',discrimination:'Discrimination',wills:'Wills & Estates'};
+const STATUS_LABELS = {active:'Active',won:'Won ✓',lost:'Lost',settled:'Settled',appealing:'Appealing'};
+const CAT_ICONS = {action:'◈',filing:'↑',evidence:'📎',hearing:'⚖',legal:'§',research:'⌕'};
+const TYPE_ICONS = {hearing:'⚖',filing:'↑',order:'⚡',milestone:'★',note:'◈',judgment:'⚖'};
+
+let currentCaseId = null;
+
+async function loadWarRoom(caseId=null) {
+  if(caseId){ await loadCaseDetail(caseId); return; }
+  const cases = await (await fetch('/api/cases')).json();
+  const body = $('wr-body');
+
+  if(!cases.length){
+    body.innerHTML=\`<div style="text-align:center;padding:60px 20px">
+      <div style="font-size:48px;margin-bottom:16px;opacity:.3">⚡</div>
+      <div style="font-size:18px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;margin-bottom:8px">No cases yet</div>
+      <div style="font-size:13px;color:var(--t2);margin-bottom:24px">Add your first case to start building your legal strategy.</div>
+      <button class="bp" style="padding:10px 24px;font-size:13px;letter-spacing:.08em" onclick="showAddCase()">+ Add My Case</button>
+    </div>\`;
+    return;
+  }
+
+  body.innerHTML=\`
+    <div class="wr-header">
+      <h2>⚡ My Cases (\${cases.length})</h2>
+    </div>
+    <div class="case-grid" id="case-grid"></div>
+  \`;
+
+  const grid=$('case-grid');
+  cases.forEach(c=>{
+    const pct=c.total_tasks>0?Math.round((c.done_tasks/c.total_tasks)*100):0;
+    const deadline=c.next_deadline?new Date(c.next_deadline)<new Date()?'<span style="color:var(--red)">⚠ OVERDUE</span>':'Due '+c.next_deadline:'';
+    const div=document.createElement('div');
+    div.className='case-card '+c.status;
+    div.onclick=()=>loadCaseDetail(c.id);
+    div.innerHTML=\`
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:6px">
+        <div class="cc-title">\${esc(c.title)}<span class="cc-badge badge-\${c.status}">\${STATUS_LABELS[c.status]||c.status}</span></div>
+      </div>
+      <div class="cc-meta">\${esc(c.court||'')} \${c.matter_number?'· #'+esc(c.matter_number):''} \${c.area_of_law?'· '+esc(AREA_LABELS[c.area_of_law]||c.area_of_law):''}</div>
+      <div class="cc-progress"><div class="cc-progress-bar" style="width:\${pct}%"></div></div>
+      <div class="cc-stats">
+        <div>\${pct}% <span style="color:var(--t3)">complete</span></div>
+        <div><b>\${c.done_tasks||0}</b><span style="color:var(--t3)">/ \${c.total_tasks||0} tasks</span></div>
+        \${c.next_date?'<div style="color:var(--gold)">📅 '+esc(c.next_date)+'</div>':''}
+        \${deadline?'<div>'+deadline+'</div>':''}
+      </div>
+    \`;
+    grid.appendChild(div);
+  });
+
+  // Add new case card
+  const addDiv=document.createElement('div');
+  addDiv.innerHTML='<button class="add-case-btn" onclick="showAddCase()">+ ADD NEW CASE</button>';
+  grid.appendChild(addDiv);
+}
+
+async function loadCaseDetail(id) {
+  currentCaseId=id;
+  const c = await (await fetch('/api/cases/'+id)).json();
+  const body = $('wr-body');
+  const pct=c.tasks.length>0?Math.round((c.tasks.filter(t=>t.done).length/c.tasks.length)*100):0;
+  const done=c.tasks.filter(t=>t.done).length;
+  const resources = await (await fetch('/api/court-resources?juris='+c.jurisdiction)).json();
+
+  // Build task list
+  const taskHtml = t => {
+    const isOver = t.due_date && !t.done && new Date(t.due_date)<new Date();
+    return \`<div class="task\${t.done?' done-task':''}" onclick="toggleTask(\${t.id})">
+      <div class="task-check">\${t.done?'✓':''}</div>
+      <div class="task-body">
+        <div class="task-title">\${esc(t.title)}</div>
+        \${t.description?\`<div class="task-desc">\${esc(t.description)}</div>\`:''}
+        <div class="task-meta">
+          <span class="task-cat cat-\${t.category}">\${CAT_ICONS[t.category]||'◈'} \${t.category}</span>
+          \${t.due_date?\`<span class="task-due\${isOver?' overdue':''}">\${isOver?'⚠ OVERDUE: ':'Due: '}\${t.due_date}</span>\`:''}
+        </div>
+      </div>
+      <button class="task-del" onclick="event.stopPropagation();deleteTask(\${t.id})" title="Delete">✕</button>
+    </div>\`;
+  };
+
+  const pending = c.tasks.filter(t=>!t.done);
+  const completed = c.tasks.filter(t=>t.done);
+
+  body.innerHTML=\`
+    <div id="case-detail" style="display:flex">
+      <div class="cd-header">
+        <button class="bg" style="padding:4px 10px;font-size:11px" onclick="loadWarRoom()">← Cases</button>
+        <h2>\${esc(c.title)}<span class="cc-badge badge-\${c.status}" style="margin-left:8px">\${STATUS_LABELS[c.status]||c.status}</span></h2>
+        <div style="font-size:11px;color:var(--t3)">\${pct}% · \${done}/\${c.tasks.length} tasks · \${c.area_of_law?AREA_LABELS[c.area_of_law]:''}</div>
+        <div style="margin-left:auto;display:flex;gap:6px">
+          <button class="bg" style="font-size:11px;padding:4px 10px" onclick="showEditCase(\${c.id})">Edit</button>
+          <button class="bg" style="font-size:11px;padding:4px 10px;color:var(--red);border-color:var(--red)" onclick="deleteCaseConfirm(\${c.id})">Delete</button>
+        </div>
+      </div>
+      <div class="cd-body">
+        <div class="cd-left">
+          <!-- Progress -->
+          <div style="background:var(--s2);border:1px solid var(--bd2);border-radius:10px;padding:14px;margin-bottom:16px">
+            <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:8px">
+              <span style="color:var(--t2)">Case progress</span>
+              <span style="font-weight:700;color:\${pct===100?'var(--green)':'var(--accent)'}">\${pct}%</span>
+            </div>
+            <div class="cc-progress" style="height:8px"><div class="cc-progress-bar" style="width:\${pct}%"></div></div>
+            \${c.next_date?\`<div style="margin-top:10px;font-size:11px;color:var(--gold)">📅 Next date: <b>\${c.next_date}</b></div>\`:''}
+            \${c.matter_number?\`<div style="margin-top:4px;font-size:11px;color:var(--t2)">Matter: <b>\${esc(c.matter_number)}</b></div>\`:''}
+            \${c.notes?\`<div style="margin-top:8px;font-size:11px;color:var(--t2);white-space:pre-wrap">\${esc(c.notes)}</div>\`:''}
+          </div>
+
+          <!-- Tasks -->
+          <div class="section-head">▶ TASKS (\${pending.length} pending)</div>
+          <div class="task-list" id="task-list">
+            \${pending.map(taskHtml).join('')}
+          </div>
+          \${completed.length?\`<div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px;cursor:pointer" onclick="toggleCompleted()">▾ Completed (\${completed.length})</div>
+          <div id="completed-tasks" style="display:none" class="task-list">\${completed.map(taskHtml).join('')}</div>\`:''}
+
+          <!-- Add task form -->
+          <button class="bg" style="width:100%;margin-top:8px;font-size:11px;letter-spacing:.05em" onclick="showAddTask()">+ Add task</button>
+          <div id="add-task-form" style="display:none" class="add-form">
+            <input id="nt-title" placeholder="Task title *" type="text">
+            <textarea id="nt-desc" placeholder="Description (optional)"></textarea>
+            <div class="form-row">
+              <select id="nt-cat">
+                <option value="action">◈ Action</option>
+                <option value="filing">↑ Filing</option>
+                <option value="evidence">📎 Evidence</option>
+                <option value="hearing">⚖ Hearing</option>
+                <option value="legal">§ Legal</option>
+                <option value="research">⌕ Research</option>
+              </select>
+              <input id="nt-due" type="date" placeholder="Due date">
+            </div>
+            <div style="display:flex;gap:6px">
+              <button class="bp" style="font-size:11px;flex:1" onclick="addTask()">Add Task</button>
+              <button class="bg" style="font-size:11px" onclick="$('add-task-form').style.display='none'">Cancel</button>
+            </div>
+          </div>
+
+          <!-- Documents -->
+          <div class="section-head" style="margin-top:20px">📎 EVIDENCE & DOCUMENTS (\${c.documents.length})</div>
+          <div class="doc-list" id="doc-list">
+            \${c.documents.map(d=>\`<div class="doc-item \${d.status==='have'?'have':''}" onclick="toggleDoc(\${d.id})">
+              <span class="doc-status">\${d.status==='have'?'✅':'☐'}</span>
+              <span class="doc-title">\${esc(d.title)}</span>
+              <button class="doc-del" onclick="event.stopPropagation();deleteDoc(\${d.id})">✕</button>
+            </div>\`).join('')}
+          </div>
+          <div id="add-doc-form-wrap">
+            <button class="bg" style="width:100%;margin-top:6px;font-size:11px;letter-spacing:.05em" onclick="$('add-doc-form').style.display='block';this.style.display='none'">+ Add document</button>
+            <div id="add-doc-form" style="display:none" class="add-form">
+              <input id="nd-title" placeholder="Document name *" type="text">
+              <div style="display:flex;gap:6px">
+                <button class="bp" style="font-size:11px;flex:1" onclick="addDoc()">Add</button>
+                <button class="bg" style="font-size:11px" onclick="$('add-doc-form').style.display='none';$('add-doc-form-wrap').querySelector('button').style.display='block'">Cancel</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- NSW Caselaw search -->
+          <div class="section-head" style="margin-top:20px">⌕ SEARCH NSW CASELAW</div>
+          <div style="display:flex;gap:6px;margin-bottom:8px">
+            <input id="nsw-q" type="text" style="flex:1;background:var(--bg);border:1px solid var(--bd2);color:var(--text);padding:6px 9px;border-radius:6px;font-size:12px;font-family:'Roboto Mono',monospace;outline:none" placeholder="Search by party name or issue…" value="\${esc(c.title.split(' v ')[0]||'')}">
+            <button class="bp" style="font-size:11px;padding:6px 12px;white-space:nowrap" onclick="searchCaselaw()">Search</button>
+          </div>
+          <div id="nsw-results"></div>
+        </div>
+
+        <div class="cd-right">
+          <!-- Timeline -->
+          <div class="section-head">▶ TIMELINE</div>
+          <div class="timeline" id="timeline">
+            \${c.events.map(e=>\`<div class="tl-item">
+              <div class="tl-dot \${e.event_type}">\${TYPE_ICONS[e.event_type]||'◈'}</div>
+              <div class="tl-content">
+                <div class="tl-title">\${esc(e.title)}</div>
+                \${e.event_date?\`<div class="tl-date">\${e.event_date}</div>\`:''}
+                \${e.description?\`<div class="tl-desc">\${esc(e.description)}</div>\`:''}
+              </div>
+              <button class="tl-del" onclick="deleteEvent(\${e.id})">✕</button>
+            </div>\`).join('')}
+          </div>
+          <div id="add-event-form" class="add-form" style="margin-top:8px">
+            <input id="ne-title" placeholder="Event title *" type="text">
+            <div class="form-row">
+              <input id="ne-date" type="date">
+              <select id="ne-type">
+                <option value="hearing">⚖ Hearing</option>
+                <option value="filing">↑ Filing</option>
+                <option value="order">⚡ Order</option>
+                <option value="milestone">★ Milestone</option>
+                <option value="note" selected>◈ Note</option>
+              </select>
+            </div>
+            <input id="ne-desc" placeholder="Details (optional)" type="text">
+            <button class="bp" style="width:100%;font-size:11px" onclick="addEvent()">Add to timeline</button>
+          </div>
+
+          <!-- Court resources -->
+          <div class="section-head" style="margin-top:20px">🔗 COURT RESOURCES</div>
+          <div class="res-grid">
+            \${resources.map(r=>\`<div class="res-item"><div><div style="font-weight:600;font-size:11px">\${esc(r.name)}</div><div style="font-size:10px;color:var(--t3)">\${esc(r.desc)}</div></div><a href="\${esc(r.url)}" target="_blank" rel="noopener">Open ↗</a></div>\`).join('')}
+          </div>
+
+          <!-- AI: Research this case -->
+          <div class="section-head" style="margin-top:20px">◈ AI RESEARCH</div>
+          <button class="blink" style="width:100%;padding:9px;font-size:12px;letter-spacing:.06em" onclick="researchThisCase()">◈ Research \${esc(AREA_LABELS[c.area_of_law]||'my case')} with AI</button>
+        </div>
+      </div>
+    </div>
+  \`;
+}
+
+function toggleCompleted(){ const d=$('completed-tasks'); d.style.display=d.style.display==='none'?'block':'none'; }
+
+async function toggleTask(id){
+  await fetch('/api/cases/'+currentCaseId+'/tasks/'+id+'/toggle',{method:'POST'});
+  loadCaseDetail(currentCaseId);
+}
+async function deleteTask(id){
+  if(!confirm('Delete this task?'))return;
+  await fetch('/api/cases/'+currentCaseId+'/tasks/'+id,{method:'DELETE'});
+  loadCaseDetail(currentCaseId);
+}
+function showAddTask(){$('add-task-form').style.display=$('add-task-form').style.display==='none'?'block':'none'}
+async function addTask(){
+  const t=$('nt-title').value.trim();if(!t)return;
+  await fetch('/api/cases/'+currentCaseId+'/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t,description:$('nt-desc').value,category:$('nt-cat').value,due_date:$('nt-due').value||null})});
+  loadCaseDetail(currentCaseId);
+}
+async function deleteEvent(id){
+  await fetch('/api/cases/'+currentCaseId+'/events/'+id,{method:'DELETE'});
+  loadCaseDetail(currentCaseId);
+}
+async function addEvent(){
+  const t=$('ne-title').value.trim();if(!t)return;
+  await fetch('/api/cases/'+currentCaseId+'/events',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t,event_date:$('ne-date').value||null,event_type:$('ne-type').value,description:$('ne-desc').value})});
+  loadCaseDetail(currentCaseId);
+}
+async function toggleDoc(id){
+  await fetch('/api/cases/'+currentCaseId+'/documents/'+id+'/toggle',{method:'POST'});
+  loadCaseDetail(currentCaseId);
+}
+async function deleteDoc(id){
+  await fetch('/api/cases/'+currentCaseId+'/documents/'+id,{method:'DELETE'});
+  loadCaseDetail(currentCaseId);
+}
+async function addDoc(){
+  const t=$('nd-title').value.trim();if(!t)return;
+  await fetch('/api/cases/'+currentCaseId+'/documents',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t})});
+  loadCaseDetail(currentCaseId);
+}
+
+async function searchCaselaw(){
+  const q=$('nsw-q').value.trim();if(!q)return;
+  const r=$('nsw-results');
+  r.innerHTML='<div style="font-size:11px;color:var(--t3)">Searching NSW Caselaw…</div>';
+  const d=await (await fetch('/api/courtlink?q='+encodeURIComponent(q))).json();
+  if(!d.results?.length){r.innerHTML='<div style="font-size:11px;color:var(--t3)">No results found. Try different search terms.</div>';return}
+  r.innerHTML='<div class="court-results">'+d.results.map(c=>\`<div class="cr-item">
+    <div class="cr-title"><a href="\${esc(c.url)}" target="_blank" rel="noopener">\${esc(c.title)}</a></div>
+    <div class="cr-meta">\${esc(c.court)} \${c.date?'· '+esc(c.date):''}</div>
+    \${c.summary?\`<div class="cr-snip">\${esc(c.summary)}</div>\`:''}
+  </div>\`).join('')+'</div>';
+}
+
+function researchThisCase(){
+  switchTab('research');
+  openRP();
+  const c = {area: currentCaseId?'':'', juris: ''};
+  fetch('/api/cases/'+currentCaseId).then(r=>r.json()).then(d=>{
+    $('rpdesc').value=d.title+(d.notes?'\n\n'+d.notes:'');
+    if(d.jurisdiction)$('rpjur').value=d.jurisdiction;
+    if(d.area_of_law)$('rparea').value=d.area_of_law;
+  });
+}
+
+// Add case modal
+function showAddCase(prefill={}){
+  const overlay=document.createElement('div');
+  overlay.id='add-case-overlay';
+  overlay.style='position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:200;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(6px)';
+  overlay.innerHTML=\`<div style="background:var(--s1);border:1px solid var(--bd2);border-radius:14px;width:500px;padding:28px;box-shadow:0 25px 80px rgba(0,0,0,.7);max-height:90vh;overflow-y:auto">
+    <div style="font-size:15px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;margin-bottom:18px;color:var(--accent)">⚡ ADD CASE</div>
+    <label style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:4px">Case title *</label>
+    <input id="nc-title" type="text" placeholder="e.g. Smith v Jones Pty Ltd" style="width:100%;background:var(--bg);border:1.5px solid var(--bd2);color:var(--text);padding:8px 10px;border-radius:7px;font-size:13px;font-family:'Roboto Mono',monospace;outline:none;margin-bottom:10px">
+    <div class="form-row" style="margin-bottom:10px">
+      <div>
+        <label style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:4px">Court / Tribunal</label>
+        <input id="nc-court" type="text" placeholder="e.g. NSWSC, NCAT, FWC" style="width:100%;background:var(--bg);border:1px solid var(--bd2);color:var(--text);padding:7px 9px;border-radius:6px;font-size:12px;font-family:'Roboto Mono',monospace;outline:none">
+      </div>
+      <div>
+        <label style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:4px">Matter number</label>
+        <input id="nc-num" type="text" placeholder="e.g. 2024/00123" style="width:100%;background:var(--bg);border:1px solid var(--bd2);color:var(--text);padding:7px 9px;border-radius:6px;font-size:12px;font-family:'Roboto Mono',monospace;outline:none">
+      </div>
+    </div>
+    <div class="form-row" style="margin-bottom:10px">
+      <div>
+        <label style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:4px">Area of law</label>
+        <select id="nc-area" style="width:100%;background:var(--bg);border:1px solid var(--bd2);color:var(--text);padding:7px 9px;border-radius:6px;font-size:12px;font-family:'Roboto Mono',monospace;outline:none;appearance:none">
+          <option value="">Select area…</option>
+          <option value="tenancy">🏠 Renting & Tenancy</option>
+          <option value="employment">💼 Employment</option>
+          <option value="family">👨‍👩‍👧 Family Law</option>
+          <option value="consumer">🛒 Consumer</option>
+          <option value="debt">💰 Debt & Contracts</option>
+          <option value="injury">🤕 Personal Injury</option>
+          <option value="criminal">⚖️ Criminal</option>
+          <option value="immigration">✈️ Immigration</option>
+          <option value="property">🏡 Property</option>
+          <option value="discrimination">🤝 Discrimination</option>
+          <option value="wills">📜 Wills & Estates</option>
+        </select>
+      </div>
+      <div>
+        <label style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:4px">Jurisdiction</label>
+        <select id="nc-juris" style="width:100%;background:var(--bg);border:1px solid var(--bd2);color:var(--text);padding:7px 9px;border-radius:6px;font-size:12px;font-family:'Roboto Mono',monospace;outline:none;appearance:none">
+          <option value="nsw">New South Wales</option>
+          <option value="vic">Victoria</option>
+          <option value="qld">Queensland</option>
+          <option value="cth">Commonwealth</option>
+          <option value="sa">South Australia</option>
+          <option value="wa">Western Australia</option>
+          <option value="tas">Tasmania</option>
+          <option value="nt">Northern Territory</option>
+          <option value="act">ACT</option>
+        </select>
+      </div>
+    </div>
+    <label style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:4px">Next court date</label>
+    <input id="nc-date" type="date" style="width:100%;background:var(--bg);border:1px solid var(--bd2);color:var(--text);padding:7px 9px;border-radius:6px;font-size:12px;font-family:'Roboto Mono',monospace;outline:none;margin-bottom:10px">
+    <label style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:4px">Notes</label>
+    <textarea id="nc-notes" rows="3" placeholder="Brief description of your case…" style="width:100%;background:var(--bg);border:1px solid var(--bd2);color:var(--text);padding:7px 9px;border-radius:6px;font-size:12px;font-family:'Roboto Mono',monospace;outline:none;resize:vertical;margin-bottom:14px"></textarea>
+    <div style="font-size:11px;color:var(--t3);margin-bottom:14px">✓ Pre-built task checklist will be added automatically for the selected area of law.</div>
+    <div style="display:flex;gap:8px">
+      <button class="bp" style="flex:1;padding:10px;font-size:12px;letter-spacing:.08em" onclick="submitAddCase()">⚡ CREATE CASE</button>
+      <button class="bg" style="padding:10px 14px;font-size:12px" onclick="document.getElementById('add-case-overlay').remove()">Cancel</button>
+    </div>
+  </div>\`;
+  document.body.appendChild(overlay);
+  setTimeout(()=>$('nc-title').focus(),80);
+}
+
+async function submitAddCase(){
+  const title=$('nc-title').value.trim();
+  if(!title)return;
+  const data={title,court:$('nc-court').value,matter_number:$('nc-num').value,area_of_law:$('nc-area').value,jurisdiction:$('nc-juris').value||'nsw',next_date:$('nc-date').value||null,notes:$('nc-notes').value};
+  const r=await fetch('/api/cases',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  const c=await r.json();
+  document.getElementById('add-case-overlay').remove();
+  await loadCaseDetail(c.id);
+}
+
+async function deleteCaseConfirm(id){
+  if(!confirm('Delete this case and all its tasks? This cannot be undone.'))return;
+  await fetch('/api/cases/'+id,{method:'DELETE'});
+  currentCaseId=null;
+  loadWarRoom();
 }
 
 function showEmpty(msg='Search Australian case law and legislation') {
@@ -1010,6 +1497,7 @@ setInterval(pollStatus,4000);setInterval(pollStats,8000);
 
 // ─── Server ───────────────────────────────────────────────────────────────────
 const db = getDb();
+initCasesTables();
 
 const server = createServer(async (req, res) => {
   const url  = new URL(req.url, `http://localhost:${PORT}`);
@@ -1130,12 +1618,81 @@ const server = createServer(async (req, res) => {
   // ── Areas ──
   if (path==='/api/areas') return jres(res, AREAS.map(a=>({id:a.id,label:a.label,icon:a.icon,desc:a.desc})));
 
+  // ── Court resources ──
+  if (path==='/api/court-resources') {
+    const juris = url.searchParams.get('juris') || 'nsw';
+    const { COURT_RESOURCES } = await import('./courtlink.js');
+    return jres(res, COURT_RESOURCES[juris] || COURT_RESOURCES.nsw);
+  }
+
+  // ── NSW Caselaw search ──
+  if (path==='/api/courtlink') {
+    const q = url.searchParams.get('q') || '';
+    if (!q) return jres(res, { results: [] });
+    try {
+      const { searchNSWCaselaw } = await import('./courtlink.js');
+      const results = await searchNSWCaselaw(q, 8);
+      return jres(res, { results });
+    } catch(e) { return jres(res, { results: [], error: e.message }); }
+  }
+
+  // ── Cases CRUD ──
+  if (path==='/api/cases' && req.method==='GET')  return jres(res, getCases());
+  if (path==='/api/cases' && req.method==='POST') {
+    const data = JSON.parse(await body(req));
+    return jres(res, createCase(data), 201);
+  }
+
+  const caseMatch = path.match(/^\/api\/cases\/(\d+)$/);
+  if (caseMatch) {
+    const cid = parseInt(caseMatch[1], 10);
+    if (req.method==='GET')    return jres(res, getCase(cid) || {error:'Not found'});
+    if (req.method==='PUT')    return jres(res, updateCase(cid, JSON.parse(await body(req))));
+    if (req.method==='DELETE') { deleteCase(cid); return jres(res, {ok:true}); }
+  }
+
+  // Tasks
+  const taskPost = path.match(/^\/api\/cases\/(\d+)\/tasks$/);
+  if (taskPost && req.method==='POST') {
+    upsertTask(parseInt(taskPost[1],10), JSON.parse(await body(req)));
+    return jres(res, {ok:true});
+  }
+  const taskToggle = path.match(/^\/api\/cases\/(\d+)\/tasks\/(\d+)\/toggle$/);
+  if (taskToggle && req.method==='POST') {
+    const db2 = getDb();
+    const t = db2.prepare('SELECT done FROM case_tasks WHERE id=?').get(parseInt(taskToggle[2],10));
+    db2.prepare('UPDATE case_tasks SET done=? WHERE id=?').run(t?.done?0:1, parseInt(taskToggle[2],10));
+    return jres(res, {ok:true});
+  }
+  const taskDel = path.match(/^\/api\/cases\/(\d+)\/tasks\/(\d+)$/);
+  if (taskDel && req.method==='DELETE') { deleteTask(parseInt(taskDel[2],10)); return jres(res,{ok:true}); }
+
+  // Events
+  const evtPost = path.match(/^\/api\/cases\/(\d+)\/events$/);
+  if (evtPost && req.method==='POST') {
+    addEvent(parseInt(evtPost[1],10), JSON.parse(await body(req)));
+    return jres(res, {ok:true});
+  }
+  const evtDel = path.match(/^\/api\/cases\/(\d+)\/events\/(\d+)$/);
+  if (evtDel && req.method==='DELETE') { deleteEvent(parseInt(evtDel[2],10)); return jres(res,{ok:true}); }
+
+  // Documents
+  const docPost = path.match(/^\/api\/cases\/(\d+)\/documents$/);
+  if (docPost && req.method==='POST') {
+    addDocument(parseInt(docPost[1],10), JSON.parse(await body(req)));
+    return jres(res, {ok:true});
+  }
+  const docToggle = path.match(/^\/api\/cases\/(\d+)\/documents\/(\d+)\/toggle$/);
+  if (docToggle && req.method==='POST') { toggleDocument(parseInt(docToggle[2],10)); return jres(res,{ok:true}); }
+  const docDel = path.match(/^\/api\/cases\/(\d+)\/documents\/(\d+)$/);
+  if (docDel && req.method==='DELETE') { deleteDocument(parseInt(docDel[2],10)); return jres(res,{ok:true}); }
+
   // Fallback
   if (!res.writableEnded) { res.writeHead(404); res.end(); }
 });
 
 server.listen(PORT, () => {
   const u=`http://localhost:${PORT}`;
-  console.log(`LexAU → ${u}`);
+  console.log(`I AM THE LAW → ${u}`);
   import('child_process').then(({exec})=>exec(`open -a "Brave Browser" "${u}"`));
 });
