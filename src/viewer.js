@@ -401,6 +401,10 @@ const HTML = `<!DOCTYPE html>
     <input id="q" type="search" placeholder="Search 143,000+ cases and legislation… (press /)" autocomplete="off" spellcheck="false">
     <button class="sx" id="qx" onclick="clearQ()">✕</button>
   </div>
+  <div style="margin-left:auto;display:flex;align-items:center;gap:10px;flex-shrink:0;font-size:11px;color:var(--t2)">
+    <span style="color:var(--t3)">{{USER_EMAIL}}</span>
+    <a href="/logout" style="color:var(--accent);text-decoration:none;letter-spacing:.05em">logout</a>
+  </div>
 </header>
 
 <!-- Body -->
@@ -1649,7 +1653,9 @@ input{width:100%;background:#0a0a0a;border:1px solid #1f1f1f;border-radius:5px;c
 input:focus{border-color:#ff0099}
 button{background:#ff0099;border:none;border-radius:5px;color:#000;cursor:pointer;font-family:'Roboto Mono',monospace;font-size:.8rem;font-weight:700;letter-spacing:.15em;padding:13px;text-transform:uppercase;transition:background .2s;margin-top:6px}
 button:hover{background:#cc007a}
-.msg-err{margin-top:16px;padding:10px 13px;border-radius:5px;font-size:.8rem;background:#1a0010;border:1px solid #ff0099;color:#ff0099}`;
+.msg-err{margin-top:16px;padding:10px 13px;border-radius:5px;font-size:.8rem;background:#1a0010;border:1px solid #ff0099;color:#ff0099}
+.switch{margin-top:20px;font-size:.7rem;color:#555;text-align:center}
+.switch a{color:#ff0099;text-decoration:none}`;
 
 const SIGNUP_HTML_TPL = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>I Am The Law — Sign Up</title><style>${SIGNUP_CSS}</style></head><body>
 <div class="box">
@@ -1661,6 +1667,7 @@ const SIGNUP_HTML_TPL = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF
     <button type="submit">Sign Up</button>
   </form>
   {{MSG}}
+  <p class="switch">Already have an account? <a href="/login">Log in</a></p>
 </div>
 </body></html>`;
 const SIGNUP_HTML = SIGNUP_HTML_TPL.replace('{{MSG}}','');
@@ -1671,6 +1678,24 @@ const SIGNUP_SUCCESS_HTML = `<!DOCTYPE html><html lang="en"><head><meta charset=
   <p class="sub" style="margin-bottom:0">Account created. <a href="/signup" style="color:#ff0099;text-decoration:none">Go back</a></p>
 </div>
 </body></html>`;
+
+const LOGIN_HTML_TPL = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>I Am The Law — Login</title><style>${SIGNUP_CSS}
+.switch{margin-top:20px;font-size:.7rem;color:#555;text-align:center}
+.switch a{color:#ff0099;text-decoration:none}
+</style></head><body>
+<div class="box">
+  <h1>I Am The Law</h1>
+  <p class="sub">theradicalparty.com</p>
+  <form method="POST" action="/login">
+    <div><label for="email">Email</label><input type="email" id="email" name="email" required placeholder="you@example.com" autocomplete="email"></div>
+    <div><label for="password">Password</label><input type="password" id="password" name="password" required placeholder="your password" autocomplete="current-password"></div>
+    <button type="submit">Log In</button>
+  </form>
+  {{MSG}}
+  <p class="switch">No account? <a href="/signup">Sign up</a></p>
+</div>
+</body></html>`;
+const LOGIN_HTML = LOGIN_HTML_TPL.replace('{{MSG}}','');
 
 // ─── Server ───────────────────────────────────────────────────────────────────
 const db = getDb();
@@ -1692,6 +1717,12 @@ db.exec(`CREATE TABLE IF NOT EXISTS users (
   created_at TEXT    DEFAULT (datetime('now'))
 )`);
 
+db.exec(`CREATE TABLE IF NOT EXISTS sessions (
+  token      TEXT PRIMARY KEY,
+  user_id    INTEGER NOT NULL,
+  created_at TEXT    DEFAULT (datetime('now'))
+)`);
+
 const ADMIN_PW = 'potato';
 
 function logEvent(type, req, data) {
@@ -1702,6 +1733,13 @@ function logEvent(type, req, data) {
 function parseCookies(req) {
   const h = req.headers.cookie || '';
   return Object.fromEntries(h.split(';').map(c => c.trim().split('=').map(decodeURIComponent)));
+}
+
+function getSession(req) {
+  const token = parseCookies(req).sid;
+  if (!token) return null;
+  const row = db.prepare('SELECT s.token, u.id, u.email FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?').get(token);
+  return row || null;
 }
 
 function adminHtml(rows, keys, users) {
@@ -1810,13 +1848,38 @@ const server = createServer(async (req, res) => {
   const path = url.pathname;
 
   // ── Static ──
-  if (path==='/'||path==='/index.html') return hres(res, HTML);
+  if (path==='/'||path==='/index.html') {
+    const user = getSession(req);
+    if (!user) { res.writeHead(302,{'Location':'/login'}); res.end(); return; }
+    return hres(res, HTML.replace('{{USER_EMAIL}}', user.email));
+  }
+
+  // ── Logout ────────────────────────────────────────────────────────────────
+  if (path==='/logout') {
+    const token = parseCookies(req).sid;
+    if (token) db.prepare('DELETE FROM sessions WHERE token=?').run(token);
+    res.writeHead(302,{'Set-Cookie':'sid=; Path=/; HttpOnly; Max-Age=0','Location':'/login'}); res.end(); return;
+  }
+
+  // ── Login ─────────────────────────────────────────────────────────────────
+  if (path==='/login') {
+    if (req.method==='GET') { hres(res, LOGIN_HTML); return; }
+    if (req.method==='POST') {
+      const raw = await body(req);
+      const params = new URLSearchParams(raw);
+      const email = (params.get('email')||'').trim().toLowerCase();
+      const password = (params.get('password')||'').trim();
+      const user = db.prepare('SELECT * FROM users WHERE email=? AND password=?').get(email, password);
+      if (!user) { hres(res, LOGIN_HTML_TPL.replace('{{MSG}}','<p class="msg-err">Wrong email or password.</p>')); return; }
+      const token = crypto.randomUUID();
+      db.prepare('INSERT INTO sessions (token,user_id) VALUES (?,?)').run(token, user.id);
+      res.writeHead(302,{'Set-Cookie':`sid=${token}; Path=/; HttpOnly`,'Location':'/'}); res.end(); return;
+    }
+  }
 
   // ── Signup ────────────────────────────────────────────────────────────────
   if (path==='/signup') {
-    if (req.method==='GET') {
-      hres(res, SIGNUP_HTML); return;
-    }
+    if (req.method==='GET') { hres(res, SIGNUP_HTML); return; }
     if (req.method==='POST') {
       const raw = await body(req);
       const params = new URLSearchParams(raw);
@@ -1829,7 +1892,7 @@ const server = createServer(async (req, res) => {
         if (e.message.includes('UNIQUE')) { hres(res, SIGNUP_HTML_TPL.replace('{{MSG}}','<p class="msg-err">That email is already registered.</p>')); return; }
         throw e;
       }
-      res.writeHead(302,{'Location':'/signup/success'}); res.end(); return;
+      res.writeHead(302,{'Location':'/login'}); res.end(); return;
     }
   }
   if (path==='/signup/success') { hres(res, SIGNUP_SUCCESS_HTML); return; }
