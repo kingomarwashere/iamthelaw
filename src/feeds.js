@@ -5,7 +5,9 @@ export const AUSTLII_BASE = 'https://www.austlii.edu.au';
 
 // Delay between requests (ms) — be respectful to AustLII
 export const REQUEST_DELAY_MS = 1500;
-export const CONCURRENT_FEEDS = 3;
+// Single-page Playwright session — concurrency > 1 causes context-destroyed errors
+// when a retry navigation interrupts an in-flight page.evaluate()
+export const CONCURRENT_FEEDS = 1;
 
 export const FEEDS = [
   // ─── HIGH COURT & FEDERAL ─────────────────────────────────────────────────

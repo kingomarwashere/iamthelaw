@@ -5,52 +5,53 @@ import { AUSTLII_BASE, REQUEST_DELAY_MS } from './feeds.js';
 
 const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', cdataPropName: '__cdata' });
 
-let _browser = null;
-let _page    = null;
-let _warmedUp = false;
+let _browser     = null;
+let _page        = null;
+let _warmupPromise = null; // shared promise so concurrent callers don't each try to warm up
 
 async function getPage() {
-  if (_page && _warmedUp) return _page;
+  if (_page && _warmupPromise) return _warmupPromise.then(() => _page);
 
-  if (!_browser) {
-    _browser = await chromium.launch({
-      headless: true,
-      args: ['--disable-blink-features=AutomationControlled'],
-    });
+  if (!_warmupPromise) {
+    _warmupPromise = (async () => {
+      _browser = await chromium.launch({
+        headless: true,
+        args: ['--disable-blink-features=AutomationControlled'],
+      });
+
+      const context = await _browser.newContext({
+        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        locale: 'en-AU',
+        viewport: { width: 1280, height: 720 },
+      });
+
+      _page = await context.newPage();
+      await _page.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      });
+
+      // Navigate to the first feed URL to pass the Cloudflare challenge and set
+      // cf_clearance cookie for the entire /cgi-bin/feed/ path.
+      console.log('  [browser] Establishing Cloudflare session for /cgi-bin/feed/...');
+      await _page.goto(`${AUSTLII_BASE}/cgi-bin/feed/au/cases/cth/HCA/`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 60000,
+      });
+      await _page.waitForTimeout(3000);
+      console.log('  [browser] Session ready');
+    })();
   }
 
-  const context = await _browser.newContext({
-    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    locale: 'en-AU',
-    viewport: { width: 1280, height: 720 },
-  });
-
-  _page = await context.newPage();
-  await _page.addInitScript(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-  });
-
-  // Navigate to the first feed URL — this passes the Cloudflare managed challenge
-  // and sets cf_clearance cookie for the entire /cgi-bin/feed/ path.
-  // All subsequent feeds can be fetched with in-page fetch() using the same cookie.
-  console.log('  [browser] Establishing Cloudflare session for /cgi-bin/feed/...');
-  await _page.goto(`${AUSTLII_BASE}/cgi-bin/feed/au/cases/cth/HCA/`, {
-    waitUntil: 'domcontentloaded',
-    timeout: 60000,
-  });
-  await _page.waitForTimeout(3000);
-  _warmedUp = true;
-  console.log('  [browser] Session ready');
-
+  await _warmupPromise;
   return _page;
 }
 
 export async function closeBrowser() {
   if (_browser) {
     await _browser.close();
-    _browser  = null;
-    _page     = null;
-    _warmedUp = false;
+    _browser       = null;
+    _page          = null;
+    _warmupPromise = null;
   }
 }
 
