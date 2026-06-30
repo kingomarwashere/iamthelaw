@@ -12,6 +12,7 @@
     "legis:federal": "node src/legis-federal.js",
     "legis:vic": "node src/legis-vic.js",
     "view": "node src/viewer.js",
+    "daemon": "node src/daemon.js",
     "api": "node src/api.js",
     "stats": "node src/stats.js"
   },
