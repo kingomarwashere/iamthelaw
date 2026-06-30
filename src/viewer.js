@@ -33,7 +33,7 @@ const SUPERIOR = new Set(['au/cases/cth/HCA','au/cases/nsw/NSWCA','au/cases/nsw/
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function jres(res,data,s=200){res.writeHead(s,{'Content-Type':'application/json'});res.end(JSON.stringify(data))}
-function hres(res,b){res.writeHead(200,{'Content-Type':'text/html;charset=utf-8'});res.end(b)}
+function hres(res,b){res.writeHead(200,{'Content-Type':'text/html;charset=utf-8','Cache-Control':'no-store, no-cache, must-revalidate','Pragma':'no-cache'});res.end(b)}
 function stream(res){res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache','Connection':'keep-alive'})}
 function sse(res,data){res.write(`data: ${JSON.stringify(data)}\n\n`)}
 function body(req){return new Promise(r=>{let b='';req.on('data',c=>b+=c);req.on('end',()=>r(b))})}
