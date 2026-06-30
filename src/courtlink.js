@@ -312,15 +312,21 @@ export async function scrapeRegistryCases(partyName) {
     const pageUrl = page.url();
     console.log('[Registry] On search page:', pageUrl);
 
-    // Dump all form inputs for debugging
-    const formInfo = await page.evaluate(() => ({
-      inputs: [...document.querySelectorAll('input,select')].map(i => ({ tag: i.tagName, name: i.name, id: i.id, type: i.type, placeholder: i.placeholder, value: i.value })),
-      buttons: [...document.querySelectorAll('button,input[type=submit]')].map(b => ({ text: b.textContent?.trim(), type: b.type, id: b.id })),
-      pageText: document.body.innerText.slice(0, 500),
-    }));
-    console.log('[Registry] Form info:', JSON.stringify(formInfo, null, 2));
+    // Try to fill party name into the search form
+    if (partyName) {
+      const filled = await page.evaluate((name) => {
+        // Common field names/placeholders for party/surname fields
+        const candidates = [...document.querySelectorAll('input[type=text],input[type=search],input:not([type])')];
+        const nameField = candidates.find(i =>
+          /party|surname|last.?name|name|applicant|defendant|respondent/i.test(i.name + i.id + i.placeholder + i.label)
+        ) || candidates[0];
+        if (nameField) { nameField.value = name; nameField.dispatchEvent(new Event('input',{bubbles:true})); return true; }
+        return false;
+      }, partyName);
+      console.log('[Registry] Filled party name:', filled, partyName);
+    }
 
-    // Submit the search with empty fields to list all user's cases
+    // Submit search
     const submitBtn = await page.$('button[type=submit], input[type=submit], button:has-text("Search")');
     if (submitBtn) {
       await Promise.all([
@@ -329,7 +335,6 @@ export async function scrapeRegistryCases(partyName) {
       ]);
       await page.waitForTimeout(2000);
     } else {
-      // Try pressing Enter in any input
       const anyInput = await page.$('input[type=text], input[type=search]');
       if (anyInput) { await anyInput.press('Enter'); await page.waitForTimeout(3000); }
     }
@@ -526,6 +531,115 @@ export async function scrapeRegistryCaseDetail(url) {
       screenshot: screenshot ? 'data:image/jpeg;base64,' + screenshot.toString('base64') : null,
     };
   }
+}
+
+export async function scrapeCourtLists(partyName) {
+  if (!_registryLoggedIn || !_registryPage) return { ok: false, error: 'Not logged in' };
+  const page = _registryPage;
+  try {
+    // Navigate to Court Lists via nav link
+    await page.goto('https://onlineregistry.lawlink.nsw.gov.au/content/landing', { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.waitForTimeout(1500);
+
+    const courtListsHref = await page.evaluate(() => {
+      const a = [...document.querySelectorAll('a')].find(a => /court\s*lists?/i.test(a.textContent.trim()));
+      return a?.href || null;
+    });
+    const url = courtListsHref || 'https://onlineregistry.lawlink.nsw.gov.au/content/court-lists';
+    console.log('[Registry] Court Lists URL:', url);
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.waitForTimeout(2000);
+
+    // Try to search by party name
+    if (partyName) {
+      await page.evaluate((name) => {
+        const f = [...document.querySelectorAll('input')].find(i =>
+          /party|name|search/i.test(i.name + i.id + i.placeholder));
+        if (f) { f.value = name; f.dispatchEvent(new Event('input',{bubbles:true})); }
+      }, partyName);
+      const btn = await page.$('button[type=submit],input[type=submit],button:has-text("Search")');
+      if (btn) {
+        await Promise.all([page.waitForNavigation({timeout:15000}).catch(()=>{}), btn.click()]);
+        await page.waitForTimeout(2000);
+      }
+    }
+
+    const rawText = await page.evaluate(() => document.body.innerText);
+    const nameUpper = partyName.toUpperCase();
+    const nameParts = nameUpper.split(/\s+/);
+
+    // Extract lines mentioning the party name
+    const hits = rawText.split('\n').filter(line => {
+      const l = line.toUpperCase();
+      return nameParts.some(p => p.length > 2 && l.includes(p));
+    }).map(l => l.trim()).filter(l => l.length > 5);
+
+    // Also extract structured table rows
+    const tableRows = await page.evaluate(() =>
+      [...document.querySelectorAll('table tbody tr')].map(r =>
+        [...r.querySelectorAll('td')].map(c => c.textContent.trim().replace(/\s+/g,' ')))
+      .filter(r => r.length > 1)
+    );
+    const matchingRows = tableRows.filter(r =>
+      r.some(cell => nameParts.some(p => p.length > 2 && cell.toUpperCase().includes(p))));
+
+    return { ok: true, hits, matchingRows, rawUrl: page.url(), rawText: rawText.slice(0, 3000) };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+export async function discoverAllCases(partyName) {
+  if (!_registryLoggedIn || !_registryPage) return { ok: false, error: 'Not logged in' };
+  const results = { cases: [], courtListHits: [], sources: [] };
+
+  // 1. Search cases by party name
+  const caseSearch = await scrapeRegistryCases(partyName);
+  if (caseSearch.ok && caseSearch.cases?.length) {
+    results.cases.push(...caseSearch.cases);
+    results.sources.push('registry_search');
+  }
+
+  // 2. Scrape court lists for name mentions
+  const courtLists = await scrapeCourtLists(partyName);
+  if (courtLists.ok) {
+    results.courtListHits = courtLists.hits || [];
+    if (courtLists.hits?.length) results.sources.push('court_lists');
+  }
+
+  // 3. Try "My Cases" / "Filing history" nav links for additional matters
+  const page = _registryPage;
+  try {
+    await page.goto('https://onlineregistry.lawlink.nsw.gov.au/content/landing', { waitUntil: 'domcontentloaded', timeout: 15000 });
+    await page.waitForTimeout(1000);
+
+    const filingHref = await page.evaluate(() => {
+      const a = [...document.querySelectorAll('a')].find(a => /filing\s*history|my\s*cases/i.test(a.textContent));
+      return a?.href || null;
+    });
+    if (filingHref) {
+      await page.goto(filingHref, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      await page.waitForTimeout(2000);
+      const filingCases = await page.evaluate(() => {
+        return [...document.querySelectorAll('a')].filter(a => /\d{4}\/\d+/.test(a.textContent))
+          .map(a => ({ matter_number: a.textContent.trim(), title: a.closest('tr,li,div')?.textContent.trim().slice(0,100)||'', href: a.href }));
+      });
+      if (filingCases.length) {
+        results.cases.push(...filingCases.map(c => ({...c, source:'filing_history'})));
+        results.sources.push('filing_history');
+      }
+    }
+  } catch {}
+
+  // Deduplicate by matter number
+  const seen = new Set();
+  results.cases = results.cases.filter(c => {
+    const key = c.matter_number?.trim() || c.href;
+    if (!key || seen.has(key)) return false;
+    seen.add(key); return true;
+  });
+
+  return { ok: true, ...results };
 }
 
 export async function closeRegistryBrowser() {

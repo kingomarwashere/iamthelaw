@@ -9,7 +9,7 @@ import { readStatus } from './status.js';
 import { AREAS, getArea, corpusSearch, situationIntake, buildArgument, summariseCase } from './research.js';
 import { modelStatus, setKey, getKeys as gk, MODELS, DEFAULT_MODEL, streamChat } from './ai.js';
 import { initCasesTables, getCases, getCase, createCase, updateCase, deleteCase, upsertTask, deleteTask, addEvent, deleteEvent, addDocument, toggleDocument, deleteDocument, TASK_TEMPLATES } from './cases.js';
-import { searchNSWCaselaw, COURT_RESOURCES, loginNSWRegistry, submitNSW2FA, scrapeRegistryCases, scrapeRegistryCaseDetail, closeRegistryBrowser, getRegistryDebugState } from './courtlink.js';
+import { searchNSWCaselaw, COURT_RESOURCES, loginNSWRegistry, submitNSW2FA, scrapeRegistryCases, scrapeRegistryCaseDetail, scrapeCourtLists, discoverAllCases, closeRegistryBrowser, getRegistryDebugState } from './courtlink.js';
 
 const PORT          = process.env.PORT || 4242;
 const ADMIN_PASSWORD = 'boob';
@@ -335,6 +335,40 @@ aside{background:var(--s1);border-right:1px solid var(--bd);overflow-y:auto;padd
 .admerr{font-size:12px;color:var(--red);min-height:16px;margin-bottom:10px}
 .admbtns{display:flex;gap:8px}
 
+/* Insights panel */
+#insights-panel{display:none;flex-direction:column;height:100%;overflow-y:auto;padding:20px 24px}
+#insights-panel.open{display:flex}
+.ins-hero{margin-bottom:24px}
+.ins-hero h2{font-size:16px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--accent);margin-bottom:4px}
+.ins-hero p{font-size:12px;color:var(--t3);max-width:700px;line-height:1.6}
+.ins-search-bar{display:flex;gap:8px;margin-bottom:24px;max-width:640px}
+.ins-search-bar input{flex:1;background:var(--s2);border:1.5px solid var(--bd2);color:var(--text);padding:8px 12px;border-radius:7px;font-size:13px;outline:none;font-family:'Roboto Mono',monospace}
+.ins-search-bar input:focus{border-color:var(--accent)}
+.ins-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;margin-bottom:32px}
+.ins-card{background:var(--s1);border:1px solid var(--bd);border-radius:10px;padding:16px;cursor:pointer;transition:border-color .15s,background .15s;position:relative}
+.ins-card:hover{border-color:var(--accent);background:var(--s2)}
+.ins-card.active{border-color:var(--accent);background:var(--adim)}
+.ins-icon{font-size:22px;margin-bottom:8px}
+.ins-title{font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text);margin-bottom:2px}
+.ins-subtitle{font-size:10px;color:var(--accent);letter-spacing:.05em;margin-bottom:8px}
+.ins-desc{font-size:11px;color:var(--t2);line-height:1.55;margin-bottom:10px}
+.ins-power{font-size:10px;font-weight:700;color:var(--green);letter-spacing:.05em;text-transform:uppercase}
+.ins-results{background:var(--s1);border:1px solid var(--bd);border-radius:10px;padding:18px;margin-bottom:20px;display:none}
+.ins-results.open{display:block}
+.ins-results-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.ins-results-hd h3{font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--accent)}
+.ins-ai-out{font-size:12px;line-height:1.75;color:var(--t2);margin-bottom:14px;white-space:pre-wrap}
+.ins-ai-out strong,.ins-ai-out b{color:var(--text)}
+.ins-case-list{display:flex;flex-direction:column;gap:6px}
+.ins-case{background:var(--s2);border:1px solid var(--bd);border-radius:7px;padding:10px 12px;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.ins-case-title{font-size:11px;color:var(--text);flex:1;cursor:pointer}
+.ins-case-title:hover{color:var(--accent)}
+.ins-case-meta{font-size:10px;color:var(--t3);white-space:nowrap}
+/* Discover section */
+.dis-section{background:var(--s1);border:1px solid var(--bd2);border-radius:10px;padding:18px;margin-bottom:20px}
+.dis-section h3{font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--purple);margin-bottom:8px}
+.dis-hit{font-size:11px;color:var(--t2);padding:4px 0;border-bottom:1px solid var(--bd)}
+.dis-hit:last-child{border:none}
 /* Case plan modal */
 #plan-modal{position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:200;display:none;flex-direction:column}
 #plan-modal.open{display:flex}
@@ -412,6 +446,7 @@ const HTML = `<!DOCTYPE html>
     <button class="tab" data-tab="mycases" onclick="switchTab('mycases')">⚡ My Cases</button>
     <button class="tab" data-tab="research" onclick="switchTab('research')">◈ AI Research</button>
     <button class="tab" data-tab="areas" onclick="switchTab('areas')">≡ Browse</button>
+    <button class="tab" data-tab="insights" onclick="switchTab('insights')" style="color:var(--accent)">⚡ Insights</button>
   </div>
   <!-- Search bar (shown in search tab) -->
   <div class="sbar" id="searchbar">
@@ -459,6 +494,9 @@ const HTML = `<!DOCTYPE html>
       <div class="bmlist" id="bmlist"></div>
     </div>
   </aside>
+
+  <!-- Insights panel -->
+  <div id="insights-panel"></div>
 
   <!-- Main content area -->
   <div class="main" id="main">
@@ -544,7 +582,8 @@ const HTML = `<!DOCTYPE html>
           <span id="reg-dot" style="width:6px;height:6px;border-radius:50%;background:var(--t3);flex-shrink:0;transition:background .3s"></span>
           <span id="reg-badge-text" style="color:var(--t3)">Not connected</span>
         </div>
-        <button class="bg" style="font-size:11px;padding:5px 12px;background:var(--pdim);border-color:var(--purple);color:var(--purple)" onclick="syncRegistry()" id="btn-registry-sync">⟳ Sync Registry</button>
+        <button class="bg" style="font-size:11px;padding:5px 12px;background:var(--pdim);border-color:var(--purple);color:var(--purple)" onclick="discoverCases()" id="btn-discover">🔍 Discover Cases</button>
+      <button class="bg" style="font-size:11px;padding:5px 12px;background:var(--pdim);border-color:var(--purple);color:var(--purple)" onclick="syncRegistry()" id="btn-registry-sync">⟳ Sync Registry</button>
       </div>
       <div id="registry-sync-status" style="font-size:10px;color:var(--t3);margin-top:4px"></div>
       <div id="reg-2fa-box" style="display:none;margin-top:8px;display:none;align-items:center;gap:6px">
@@ -672,9 +711,17 @@ function switchTab(t) {
   }
   if (t==='mycases') {
     $('rpanel').classList.remove('open'); rpOpen=false;
+    $('insights-panel').classList.remove('open');
     loadWarRoom();
     checkRegistryStatus();
   }
+  if (t==='insights') {
+    $('rpanel').classList.remove('open'); rpOpen=false;
+    $('insights-panel').classList.add('open');
+    renderInsights();
+  }
+  // hide insights panel on all other tabs
+  if (t !== 'insights') $('insights-panel').classList.remove('open');
 }
 
 // ── WAR ROOM ──────────────────────────────────────────────────────────────────
@@ -1163,6 +1210,263 @@ function parseRegistryDate(s) {
   const p2 = s.match(/(\\d{1,2})[\\s-](Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[\\s-](\\d{4})/i);
   if (p2) return p2[3]+'-'+(MONTHS[p2[2].toLowerCase().slice(0,3)]||'01')+'-'+p2[1].padStart(2,'0');
   return null;
+}
+
+// ── Discover Cases ────────────────────────────────────────────────────────────
+async function discoverCases() {
+  const btn = $('btn-discover');
+  btn.disabled=true; btn.textContent='Discovering…';
+  setRegStatus('Searching registry + court lists for all your cases…','var(--amber)');
+  setRegBadge('connecting','Searching…');
+  try {
+    const r = await fetch('/api/registry/discover', {method:'POST'});
+    const d = await r.json();
+    if (!d.ok) { setRegStatus('Discover error: '+(d.error||'failed'),'var(--red)'); setRegBadge('error','Error'); btn.disabled=false; btn.textContent='🔍 Discover Cases'; return; }
+
+    const existing = await (await fetch('/api/cases')).json();
+    const existingNums = new Set(existing.map(c=>c.matter_number).filter(Boolean));
+    const newCases = (d.cases||[]).filter(c => c.matter_number && !existingNums.has(c.matter_number.trim()));
+
+    let msg = '';
+    if (newCases.length) {
+      msg = \`Found \${newCases.length} new case\${newCases.length>1?'s':''} not yet in your War Room\`;
+    } else {
+      msg = 'No new cases found beyond what you already have';
+    }
+    if (d.courtListHits?.length) msg += \` · \${d.courtListHits.length} court list mention\${d.courtListHits.length>1?'s':''}\`;
+
+    setRegBadge('connected', msg);
+    setRegStatus(msg,'var(--green)');
+
+    // Show discover results overlay in War Room
+    renderDiscoverResults(newCases, d.courtListHits||[], d.sources||[]);
+  } catch(e) {
+    setRegStatus('Error: '+e.message,'var(--red)'); setRegBadge('error','Error');
+  }
+  btn.disabled=false; btn.textContent='🔍 Discover Cases';
+}
+
+function renderDiscoverResults(newCases, courtHits, sources) {
+  const body = $('wr-body');
+  const esc2 = s => String(s||'').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  body.innerHTML = \`
+    <div class="cd-header">
+      <button class="bg" style="padding:4px 10px;font-size:11px" onclick="loadWarRoom()">← Cases</button>
+      <h2 style="color:var(--purple)">🔍 Case Discovery</h2>
+      <div style="font-size:11px;color:var(--t3)">Sources: \${sources.join(', ')||'registry'}</div>
+    </div>
+    <div style="padding:18px">
+      \${newCases.length ? \`
+        <div class="dis-section">
+          <h3>⚡ New Cases Found (\${newCases.length})</h3>
+          <p style="font-size:11px;color:var(--t3);margin-bottom:12px">These cases were found in the registry but aren't in your War Room yet.</p>
+          \${newCases.map(c=>\`
+            <div style="background:var(--s2);border:1px solid var(--bd);border-radius:7px;padding:10px 12px;margin-bottom:8px;display:flex;align-items:center;gap:10px">
+              <div style="flex:1">
+                <div style="font-size:12px;font-weight:700;color:var(--text)">\${esc2(c.title||c.matter_number)}</div>
+                <div style="font-size:10px;color:var(--t3)">Matter: \${esc2(c.matter_number)} \${c.next_date?'· Next: '+esc2(c.next_date):''}</div>
+              </div>
+              <button class="blink" style="font-size:11px;padding:4px 10px" onclick="importDiscoveredCase(\${JSON.stringify(c).replace(/"/g,'&quot;')})">+ Import</button>
+            </div>
+          \`).join('')}
+        </div>
+      \` : '<p style="color:var(--t3);font-size:12px;padding:8px 0">No new cases found beyond what you already have.</p>'}
+      \${courtHits.length ? \`
+        <div class="dis-section">
+          <h3>📋 Court List Mentions (\${courtHits.length})</h3>
+          \${courtHits.map(h=>\`<div class="dis-hit">\${esc2(h)}</div>\`).join('')}
+        </div>
+      \` : ''}
+    </div>
+  \`;
+}
+
+async function importDiscoveredCase(rc) {
+  await fetch('/api/cases', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({
+    title:         rc.title || rc.matter_number || 'Registry Case',
+    court:         rc.court || 'NSW Local Court',
+    matter_number: rc.matter_number || '',
+    status:        'active',
+    next_date:     parseRegistryDate(rc.next_date),
+    notes:         rc.detail_url ? 'Registry: '+rc.detail_url : '',
+    jurisdiction:  'nsw',
+    area_of_law:   'criminal',
+  })});
+  loadWarRoom();
+}
+
+// ── Insights ──────────────────────────────────────────────────────────────────
+const INSIGHTS = [
+  { id:'evidence_exclusion', icon:'🚫', title:'Exclude Illegally Obtained Evidence', sub:'s138 Evidence Act',
+    desc:'Courts have discretion to exclude evidence obtained unlawfully or improperly. Police not following search procedures, failing to caution, or lacking authority — all grounds to exclude.',
+    power:'Can destroy the prosecution case entirely',
+    queries:['unlawfully obtained evidence excluded s138','improperly obtained evidence police discretion exclude'] },
+  { id:'stay_abuse', icon:'⛔', title:'Permanent Stay — Abuse of Process', sub:'Inherent jurisdiction',
+    desc:'Courts can permanently stay proceedings when the prosecution has acted abusively, withheld evidence, caused unconscionable delay, or where a fair trial is impossible.',
+    power:'Ends the entire case — charges disappear',
+    queries:['permanent stay abuse process prosecution','stay proceedings abuse process inherent jurisdiction'] },
+  { id:'delay_dismiss', icon:'⏱', title:'Dismiss for Prosecution Delay', sub:'Dietrich principle',
+    desc:'Charges can be stayed or dismissed if the prosecution causes unreasonable delay. Rarely raised by self-reps but highly effective when delays exceed 12–18 months.',
+    power:'Entire charges dropped due to delay',
+    queries:['unreasonable delay prosecution stay dismiss','delay criminal proceedings stayed dismissed'] },
+  { id:'honest_mistake', icon:'🤔', title:'Honest & Reasonable Mistake of Fact', sub:'Complete defence — strict liability',
+    desc:'For regulatory offences (traffic, licensing, unregistered vehicles) an honest and reasonable belief you were acting lawfully is a complete defence. Almost never raised in Local Court.',
+    power:'Complete defence to most regulatory charges',
+    queries:['honest reasonable mistake fact defence strict liability','mistake of fact defence regulatory offence acquitted'] },
+  { id:'costs_prosecution', icon:'💰', title:'Costs Against Police / DPP', sub:'Criminal Procedure Act s213',
+    desc:'When charges are withdrawn or you are acquitted, courts can order costs against the prosecution for bringing an unreasonable case. Massively underused by self-reps.',
+    power:'Get paid back when police overreach',
+    queries:['costs order prosecution police acquittal','defendant awarded costs criminal matter withdrawn'] },
+  { id:'jurisdiction', icon:'⚖️', title:'Challenge Court Jurisdiction', sub:'Void for want of jurisdiction',
+    desc:'Many lower court decisions are void if the court lacked jurisdiction — wrong court, wrong charge laid, or constitutional limits on state power. Rarely raised, often succeeds.',
+    power:'Voids the entire proceeding from the start',
+    queries:['jurisdiction challenge local court void nullity','want of jurisdiction magistrates court quashed'] },
+  { id:'right_silence', icon:'🤫', title:'Right to Silence — Police Cannot Use It', sub:'Evidence Act s89',
+    desc:'No adverse inference can be drawn from silence at a police station. Any attempt to use your silence against you at trial is reversible error. Also protects pre-caution silence.',
+    power:'Blocks prosecution misusing your silence',
+    queries:['right silence adverse inference excluded evidence act','caution police silence inadmissible'] },
+  { id:'identification', icon:'👁', title:'Unreliable Identification Evidence', sub:'Part 3.9 Evidence Act',
+    desc:'Eyewitness identification is the most unreliable evidence in criminal law. Strict rules apply to how it is obtained. Procedural failures can exclude it entirely.',
+    power:"Often the prosecution's only evidence — gone",
+    queries:['identification evidence excluded unreliable eyewitness','identification procedure deficient evidence act excluded'] },
+  { id:'police_lepra', icon:'🚔', title:'LEPRA Breaches by Police', sub:'Law Enforcement Powers Act',
+    desc:'Police must follow strict procedures when stopping, searching, or arresting. LEPRA breaches can exclude evidence, support civil claims, and form grounds for appeal or dismissal.',
+    power:'Turns every police procedural error into your defence',
+    queries:['LEPRA breach police power search arrest evidence excluded','police powers exceeded unlawful LEPRA'] },
+  { id:'apprehended_bias', icon:'🎭', title:'Apprehend Magistrate Bias — Disqualify', sub:'Reasonable apprehension test',
+    desc:'A magistrate can be disqualified if a fair-minded observer would apprehend bias — prior connections to prosecution, hostile conduct at hearing, or predetermined decisions.',
+    power:'Force a completely fresh hearing before a new magistrate',
+    queries:['apprehended bias magistrate disqualification judicial officer','reasonable apprehension bias magistrate recusal'] },
+  { id:'tendency_evidence', icon:'🃏', title:'Block Bad Character / Tendency Evidence', sub:'Evidence Act ss97–101',
+    desc:'Prosecution cannot introduce prior convictions or "bad character" without meeting a strict tendency/coincidence evidence test. Courts regularly admit this improperly against self-reps.',
+    power:'Keeps your entire prior record out of the hearing',
+    queries:['tendency evidence excluded propensity bad character','coincidence evidence criminal prior convictions excluded'] },
+  { id:'proportionality', icon:'📏', title:'Disproportionate Sentence Appeal', sub:'Totality principle',
+    desc:'Sentences must be proportionate to the offence and circumstances. The totality principle limits cumulative sentences. Courts routinely over-sentence self-represented parties.',
+    power:'Reduces or eliminates excessive sentences on appeal',
+    queries:['totality principle disproportionate sentence appeal reduced','proportionality sentencing principle manifestly excessive'] },
+];
+
+let _insightsLoaded = false;
+let _activeInsight  = null;
+
+function renderInsights() {
+  if (_insightsLoaded) return;
+  _insightsLoaded = true;
+  const panel = $('insights-panel');
+  panel.innerHTML = \`
+    <div class="ins-hero">
+      <h2>⚡ Loopholes &amp; Legal Insights</h2>
+      <p>Hidden precedents and underused legal arguments that give self-represented litigants real leverage. Each category searches 143,000+ cases for supporting authority. The system bends — if you know where to push.</p>
+    </div>
+    <div class="ins-search-bar">
+      <input id="ins-q" placeholder="Search for any legal argument or topic…" onkeydown="if(event.key==='Enter')runInsightSearch()">
+      <button class="bp" style="font-size:12px;padding:7px 14px;white-space:nowrap" onclick="runInsightSearch()">⌕ Search</button>
+      <button class="bg" style="font-size:12px;padding:7px 12px;white-space:nowrap" onclick="runInsightAI()">◈ AI Explain</button>
+    </div>
+    <div id="ins-results" class="ins-results">
+      <div class="ins-results-hd">
+        <h3 id="ins-results-title">Results</h3>
+        <button class="bg" style="font-size:11px;padding:3px 8px" onclick="$('ins-results').classList.remove('open')">✕</button>
+      </div>
+      <div id="ins-ai-box" style="display:none;margin-bottom:14px;background:var(--s2);border:1px solid var(--bd);border-radius:7px;padding:12px">
+        <div style="font-size:10px;color:var(--accent);letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px" id="ins-ai-status">Generating…</div>
+        <div class="ins-ai-out" id="ins-ai-out"></div>
+      </div>
+      <div class="ins-case-list" id="ins-case-list"></div>
+    </div>
+    <div class="ins-grid" id="ins-grid">
+      \${INSIGHTS.map(ins=>\`
+        <div class="ins-card" id="ins-card-\${ins.id}" onclick="loadInsight('\${ins.id}')">
+          <div class="ins-icon">\${ins.icon}</div>
+          <div class="ins-title">\${esc(ins.title)}</div>
+          <div class="ins-subtitle">\${esc(ins.sub)}</div>
+          <div class="ins-desc">\${esc(ins.desc)}</div>
+          <div class="ins-power">→ \${esc(ins.power)}</div>
+        </div>
+      \`).join('')}
+    </div>
+  \`;
+}
+
+async function loadInsight(id) {
+  const ins = INSIGHTS.find(i=>i.id===id); if (!ins) return;
+  _activeInsight = ins;
+  document.querySelectorAll('.ins-card').forEach(c=>c.classList.remove('active'));
+  $('ins-card-'+id)?.classList.add('active');
+  $('ins-results').classList.add('open');
+  $('ins-results-title').textContent = ins.icon+' '+ins.title;
+  $('ins-ai-box').style.display='none';
+  $('ins-case-list').innerHTML='<div style="color:var(--t3);font-size:12px">Searching corpus…</div>';
+  try {
+    const results = [];
+    for (const q of ins.queries) {
+      const d = await (await fetch('/api/search?q='+encodeURIComponent(q)+'&limit=6')).json();
+      for (const r of d.results||[]) { if (!results.find(x=>x.id===r.id)) results.push(r); }
+    }
+    if (!results.length) { $('ins-case-list').innerHTML='<div style="color:var(--t3);font-size:12px">No matching cases found in local corpus. Try the AI Explain button for general guidance.</div>'; return; }
+    $('ins-case-list').innerHTML = results.slice(0,10).map(r=>\`
+      <div class="ins-case">
+        <div class="ins-case-title" onclick="openDoc(\${r.id})">\${esc(r.title||'')}</div>
+        <div class="ins-case-meta">\${(r.jurisdiction||'').toUpperCase()} \${(r.pub_date||'').slice(0,4)}</div>
+        <button class="ca" style="font-size:11px;flex-shrink:0" onclick="quickPin(\${r.id},\${JSON.stringify(r.title||'').replace(/'/g,'\\\\\'')})">📌</button>
+      </div>
+    \`).join('');
+  } catch(e) { $('ins-case-list').innerHTML='<div style="color:var(--red);font-size:12px">Error: '+esc(e.message)+'</div>'; }
+  // Auto-scroll results into view
+  $('ins-results').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+
+async function runInsightSearch() {
+  const q = $('ins-q').value.trim(); if (!q) return;
+  _activeInsight = { title: q, queries:[q] };
+  document.querySelectorAll('.ins-card').forEach(c=>c.classList.remove('active'));
+  $('ins-results').classList.add('open');
+  $('ins-results-title').textContent='⌕ '+q;
+  $('ins-ai-box').style.display='none';
+  $('ins-case-list').innerHTML='<div style="color:var(--t3);font-size:12px">Searching…</div>';
+  try {
+    const d = await (await fetch('/api/search?q='+encodeURIComponent(q)+'&limit=12')).json();
+    const results = d.results||[];
+    if (!results.length) { $('ins-case-list').innerHTML='<div style="color:var(--t3);font-size:12px">No results found.</div>'; return; }
+    $('ins-case-list').innerHTML = results.map(r=>\`
+      <div class="ins-case">
+        <div class="ins-case-title" onclick="openDoc(\${r.id})">\${esc(r.title||'')}</div>
+        <div class="ins-case-meta">\${(r.jurisdiction||'').toUpperCase()} \${(r.pub_date||'').slice(0,4)}</div>
+        <button class="ca" style="font-size:11px;flex-shrink:0" onclick="quickPin(\${r.id},\${JSON.stringify(r.title||'')})">📌</button>
+      </div>
+    \`).join('');
+  } catch(e) { $('ins-case-list').innerHTML='<div style="color:var(--red);font-size:12px">Error: '+esc(e.message)+'</div>'; }
+}
+
+async function runInsightAI() {
+  const ins = _activeInsight;
+  const q = $('ins-q')?.value?.trim();
+  const topic = ins?.title || q;
+  if (!topic) { $('ins-q')?.focus(); return; }
+  $('ins-results').classList.add('open');
+  $('ins-ai-box').style.display='block';
+  $('ins-ai-out').innerHTML='<span class="cursor"></span>';
+  $('ins-ai-status').textContent='Generating…';
+  $('ins-results-title').textContent=(ins?.icon||'◈')+' '+(ins?.title||topic);
+
+  try {
+    const r = await fetch('/api/insights/explain', {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({topic, subtitle: ins?.sub, desc: ins?.desc, power: ins?.power})});
+    if (!r.ok || !r.body) { $('ins-ai-out').textContent='Error calling AI'; $('ins-ai-status').textContent='Error'; return; }
+    const reader=r.body.getReader(); const dec=new TextDecoder(); let buf='',text='';
+    while(true){
+      const {done,value}=await reader.read(); if(done) break;
+      buf+=dec.decode(value,{stream:true}); const lines=buf.split('\\n'); buf=lines.pop();
+      for(const line of lines){
+        if(!line.startsWith('data:')) continue;
+        const d=JSON.parse(line.slice(5));
+        if(d.type==='chunk'){text+=d.text;$('ins-ai-out').innerHTML=renderMD(text)+'<span class="cursor"></span>';$('ins-ai-out').scrollTop=$('ins-ai-out').scrollHeight;}
+        if(d.type==='done'){$('ins-ai-out').innerHTML=renderMD(text);$('ins-ai-status').textContent='Done ✓';}
+        if(d.type==='error'){$('ins-ai-out').innerHTML='<span style="color:var(--red)">'+esc(d.error)+'</span>';$('ins-ai-status').textContent='Error';}
+      }
+    }
+  } catch(e){ $('ins-ai-out').innerHTML='<span style="color:var(--red)">'+esc(e.message)+'</span>'; $('ins-ai-status').textContent='Error'; }
 }
 
 function researchThisCase(){
@@ -2448,6 +2752,58 @@ Keep the tone practical, direct, and empowering for someone representing themsel
       sse(res, { type:'done' }); res.end();
     } catch(e) { try { sse(res, { type:'error', error:e.message }); res.end(); } catch {} }
     return;
+  }
+
+  // ── Insights AI explain ──
+  if (path==='/api/insights/explain' && req.method==='POST') {
+    const { topic, subtitle, desc, power } = JSON.parse(await body(req));
+    const prompt = `You are an expert Australian legal advocate helping a self-represented litigant understand a powerful legal argument they can use in court.
+
+Topic: ${topic}
+${subtitle ? `Legal basis: ${subtitle}` : ''}
+${desc ? `Description: ${desc}` : ''}
+${power ? `Strategic value: ${power}` : ''}
+
+Explain this legal argument in a way that empowers someone representing themselves. Cover:
+
+## What It Is
+Plain-English explanation of the legal principle and why it exists.
+
+## When You Can Use It
+The specific circumstances and conditions required to raise this argument.
+
+## How to Raise It in Court
+Exact language and steps — what to say, what to file, when to raise it (before or during hearing).
+
+## Key Cases to Cite
+The most important Australian precedents supporting this argument. Include the citation format courts expect.
+
+## What the Other Side Will Say
+How prosecution/opposing party typically responds, and how to counter it.
+
+## Common Mistakes
+What self-represented litigants get wrong when raising this argument.
+
+Be specific, practical, and direct. This person needs to walk into a courtroom and use this.`;
+    stream(res);
+    try {
+      const gen = streamChat([{ role:'user', content:prompt }], DEFAULT_MODEL,
+        'You are an expert Australian criminal and civil law advocate. Be specific, cite real cases, and write for someone representing themselves in an Australian court.');
+      for await (const chunk of gen) sse(res,{type:'chunk',text:chunk});
+      sse(res,{type:'done'}); res.end();
+    } catch(e) { try{sse(res,{type:'error',error:e.message});res.end()}catch{} }
+    return;
+  }
+
+  // ── Registry discover ──
+  if (path==='/api/registry/discover' && req.method==='POST') {
+    const keys = gk();
+    const { registry_user: u, registry_pass: p, registry_name: name } = keys;
+    if (!u || !p) return jres(res, { ok:false, error:'No registry credentials — add them in ⚙ Settings' }, 400);
+    const login = await loginNSWRegistry(u, p);
+    if (!login.ok && !login.needs_2fa) return jres(res, { ok:false, error:'Login failed: '+login.error }, 401);
+    const result = await discoverAllCases(name || '');
+    return jres(res, result);
   }
 
   // ── NSW Registry ──
