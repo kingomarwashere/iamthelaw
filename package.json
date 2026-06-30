@@ -9,6 +9,8 @@
     "scrape": "node src/index.js --once",
     "backfill": "node src/backfill.js",
     "legis": "node src/legis-indexer.js",
+    "legis:federal": "node src/legis-federal.js",
+    "legis:vic": "node src/legis-vic.js",
     "api": "node src/api.js",
     "stats": "node src/stats.js"
   },
