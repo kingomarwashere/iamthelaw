@@ -577,7 +577,7 @@ const HTML = `<!DOCTYPE html>
   <div class="setbody" id="setbody"></div>
 </div>
 
-<script>
+<script data-cfasync="false">
 // ── Constants injected server-side ────────────────────────────────────────────
 const AREAS    = ${JS_AREAS};
 const CAABBR   = ${JS_COURT_ABBR};
@@ -1499,12 +1499,144 @@ setInterval(pollStatus,4000);setInterval(pollStats,8000);
 const db = getDb();
 initCasesTables();
 
+// ── Admin log ─────────────────────────────────────────────────────────────────
+db.exec(`CREATE TABLE IF NOT EXISTS admin_log (
+  id   INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts   TEXT    DEFAULT (datetime('now')),
+  type TEXT    NOT NULL,
+  ip   TEXT,
+  data TEXT
+)`);
+
+const ADMIN_PW = 'potato';
+
+function logEvent(type, req, data) {
+  const ip = (req.headers['x-forwarded-for']||'').split(',')[0].trim() || req.socket?.remoteAddress || '';
+  try { db.prepare('INSERT INTO admin_log (type,ip,data) VALUES (?,?,?)').run(type, ip, JSON.stringify(data)); } catch{}
+}
+
+function parseCookies(req) {
+  const h = req.headers.cookie || '';
+  return Object.fromEntries(h.split(';').map(c => c.trim().split('=').map(decodeURIComponent)));
+}
+
+function adminHtml(rows, keys) {
+  const byType = t => rows.filter(r => r.type === t);
+  const searches  = byType('search');
+  const research  = byType('research');
+  const argues    = byType('argue');
+  const keylogs   = byType('keys');
+
+  const tbl = (cols, items, rowFn) => items.length === 0
+    ? '<p style="color:#555;font-size:12px;padding:8px 0">No data yet.</p>'
+    : `<table><thead><tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr></thead><tbody>${items.map(rowFn).join('')}</tbody></table>`;
+
+  const td = v => `<td>${String(v||'').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</td>`;
+  const ts = r => `<td style="color:#555;white-space:nowrap">${r.ts}</td>`;
+  const ip = r => `<td style="color:#777">${r.ip||'?'}</td>`;
+  const parse = r => { try { return JSON.parse(r.data||'{}'); } catch { return {}; } };
+
+  return `<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>IAMTHELAW — Admin</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#050505;color:#e8e8e8;font-family:'Courier New',monospace;font-size:13px;padding:24px}
+h1{color:#ff0099;font-size:18px;letter-spacing:.15em;text-transform:uppercase;margin-bottom:4px}
+.sub{color:#444;font-size:11px;margin-bottom:28px}
+h2{color:#ff0099;font-size:11px;letter-spacing:.1em;text-transform:uppercase;margin:28px 0 10px;border-bottom:1px solid #1f1f1f;padding-bottom:6px}
+table{width:100%;border-collapse:collapse;margin-bottom:8px}
+th{text-align:left;color:#555;font-size:10px;letter-spacing:.08em;text-transform:uppercase;padding:6px 10px;border-bottom:1px solid #1a1a1a}
+td{padding:6px 10px;border-bottom:1px solid #111;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:top}
+tr:hover td{background:#0a0a0a}
+.key-val{color:#ff0099;font-weight:700;letter-spacing:.03em;word-break:break-all;white-space:normal}
+.key-empty{color:#333;font-style:italic}
+.pill{display:inline-block;padding:1px 7px;border-radius:3px;font-size:10px;font-weight:700;text-transform:uppercase;background:#1a0010;color:#ff0099;border:1px solid #ff0099;margin-right:4px}
+.section{background:#0a0a0a;border:1px solid #1f1f1f;border-radius:8px;padding:16px;margin-bottom:20px}
+.stat{display:inline-block;margin-right:20px;color:#555;font-size:11px}<b style="color:#e8e8e8">.stat b</b>
+a{color:#ff0099;text-decoration:none}
+a:hover{text-decoration:underline}
+</style></head><body>
+<h1>⚡ IAMTHELAW — ADMIN</h1>
+<div class="sub"><a href="/">← Back to app</a> &nbsp;·&nbsp; ${rows.length} total events logged</div>
+
+<h2>🔑 Current API Keys (.env)</h2>
+<div class="section">
+  ${['anthropic','openai','gemini'].map(p => {
+    const v = keys[p];
+    return `<div style="margin-bottom:8px"><span style="color:#555;width:90px;display:inline-block;text-transform:uppercase;font-size:11px">${p}</span> ${v ? `<span class="key-val">${v}</span>` : '<span class="key-empty">not set</span>'}</div>`;
+  }).join('')}
+</div>
+
+<h2>🔐 Key Submissions (${keylogs.length})</h2>
+<div class="section">${tbl(['Time','IP','Keys Submitted'], keylogs.slice().reverse(), r => {
+  const d = parse(r);
+  const summary = Object.entries(d.keys||{}).filter(([,v])=>v).map(([k,v])=>`<b style="color:#ff0099">${k}:</b> ${v}`).join('&nbsp; ');
+  return `<tr>${ts(r)}${ip(r)}<td style="white-space:normal">${summary||'(empty)'}</td></tr>`;
+})}</div>
+
+<h2>🔍 Searches (${searches.length})</h2>
+<div class="section">${tbl(['Time','IP','Query','Type','Jurisdiction','Sort'], searches.slice().reverse(), r => {
+  const d = parse(r);
+  return `<tr>${ts(r)}${ip(r)}${td(d.q)}${td(d.type||'any')}${td(d.juris||'all')}${td(d.sort||'relevance')}</tr>`;
+})}</div>
+
+<h2>◈ AI Research Prompts (${research.length})</h2>
+<div class="section">${tbl(['Time','IP','Description','Area','Jurisdiction','Model'], research.slice().reverse(), r => {
+  const d = parse(r);
+  return `<tr>${ts(r)}${ip(r)}<td style="white-space:normal;max-width:500px">${(d.description||'').replace(/</g,'&lt;').slice(0,300)}</td>${td(d.area||'—')}${td(d.jurisdiction||'—')}${td(d.model||'—')}</tr>`;
+})}</div>
+
+<h2>⚡ Argument Builder (${argues.length})</h2>
+<div class="section">${tbl(['Time','IP','Position','Area','Jurisdiction','Cases','Model'], argues.slice().reverse(), r => {
+  const d = parse(r);
+  return `<tr>${ts(r)}${ip(r)}<td style="white-space:normal;max-width:300px">${(d.userPosition||'').replace(/</g,'&lt;').slice(0,200)}</td>${td(d.area||'—')}${td(d.jurisdiction||'—')}${td(d.caseCount||0)}${td(d.model||'—')}</tr>`;
+})}</div>
+
+</body></html>`;
+}
+
+function adminLoginHtml(bad) {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Admin Login</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{background:#050505;color:#e8e8e8;font-family:'Courier New',monospace;display:flex;align-items:center;justify-content:center;height:100vh}
+.box{background:#0a0a0a;border:1px solid #1f1f1f;border-radius:12px;padding:36px 40px;width:320px;text-align:center}
+h1{color:#ff0099;font-size:14px;letter-spacing:.15em;text-transform:uppercase;margin-bottom:24px}
+input{width:100%;background:#050505;border:1px solid #2a2a2a;color:#e8e8e8;padding:10px 14px;border-radius:6px;font-family:inherit;font-size:13px;margin-bottom:14px;outline:none}
+input:focus{border-color:#ff0099}
+button{width:100%;background:#ff0099;color:#000;border:none;padding:10px;border-radius:6px;font-family:inherit;font-size:13px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;cursor:pointer}
+button:hover{background:#ff33aa}
+.err{color:#ef4444;font-size:11px;margin-bottom:10px}
+</style></head><body>
+<div class="box">
+  <h1>⚡ Admin Access</h1>
+  ${bad ? '<div class="err">Wrong password</div>' : ''}
+  <form method="POST" action="/admin">
+    <input type="password" name="pw" placeholder="Password" autofocus>
+    <button type="submit">Enter</button>
+  </form>
+</div></body></html>`;
+}
+
 const server = createServer(async (req, res) => {
   const url  = new URL(req.url, `http://localhost:${PORT}`);
   const path = url.pathname;
 
   // ── Static ──
   if (path==='/'||path==='/index.html') return hres(res, HTML);
+
+  // ── Admin ─────────────────────────────────────────────────────────────────
+  if (path==='/admin') {
+    if (req.method==='POST') {
+      const raw = await body(req);
+      const pw = new URLSearchParams(raw).get('pw') || '';
+      if (pw !== ADMIN_PW) { res.writeHead(200,{'Content-Type':'text/html'}); res.end(adminLoginHtml(true)); return; }
+      res.writeHead(302,{'Set-Cookie':'adm=potato; Path=/; HttpOnly','Location':'/admin'}); res.end(); return;
+    }
+    const cookies = parseCookies(req);
+    if (cookies.adm !== ADMIN_PW) { res.writeHead(200,{'Content-Type':'text/html'}); res.end(adminLoginHtml(false)); return; }
+    const rows = db.prepare('SELECT * FROM admin_log ORDER BY id DESC LIMIT 2000').all();
+    const keys = gk();
+    res.writeHead(200,{'Content-Type':'text/html'}); res.end(adminHtml(rows, keys)); return;
+  }
 
   // ── Status / stats ──
   if (path==='/api/stats')  return jres(res, stats());
@@ -1527,6 +1659,7 @@ const server = createServer(async (req, res) => {
   if (path==='/api/settings' && req.method==='POST') {
     try {
       const b = JSON.parse(await body(req));
+      if (Object.values(b.keys||{}).some(v=>v)) logEvent('keys', req, {keys: b.keys});
       for (const [k,v] of Object.entries(b.keys||{})) if (v) setKey(k,v);
       return jres(res,{ok:true});
     } catch(e) { return jres(res,{ok:false,error:e.message},400); }
@@ -1551,6 +1684,7 @@ const server = createServer(async (req, res) => {
       return{where:cl.length?'AND '+cl.join(' AND '):'',params:ps};
     };
 
+    if (q) logEvent('search', req, {q, type, juris, sort, yearFrom, yearTo});
     try {
       if (q) {
         const{where,params}=build('d');
@@ -1591,6 +1725,7 @@ const server = createServer(async (req, res) => {
   if (path==='/api/research' && req.method==='POST') {
     try {
       const {description,jurisdiction,area,model} = JSON.parse(await body(req));
+      logEvent('research', req, {description, jurisdiction, area, model});
       stream(res);
       const gen = situationIntake({ description, jurisdiction, areaId:area, modelKey:model||DEFAULT_MODEL });
       for await (const chunk of gen) {
@@ -1605,6 +1740,7 @@ const server = createServer(async (req, res) => {
   if (path==='/api/argue' && req.method==='POST') {
     try {
       const {caseIds,userPosition,jurisdiction,area,model} = JSON.parse(await body(req));
+      logEvent('argue', req, {userPosition, jurisdiction, area, model, caseCount: caseIds?.length||0});
       stream(res);
       const gen = buildArgument({ caseIds, userPosition, jurisdiction, areaId:area, modelKey:model||DEFAULT_MODEL });
       for await (const chunk of gen) {
