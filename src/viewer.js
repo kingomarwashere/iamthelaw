@@ -9,7 +9,7 @@ import { readStatus } from './status.js';
 import { AREAS, getArea, corpusSearch, situationIntake, buildArgument, summariseCase } from './research.js';
 import { modelStatus, setKey, getKeys as gk, MODELS, DEFAULT_MODEL } from './ai.js';
 import { initCasesTables, getCases, getCase, createCase, updateCase, deleteCase, upsertTask, deleteTask, addEvent, deleteEvent, addDocument, toggleDocument, deleteDocument, TASK_TEMPLATES } from './cases.js';
-import { searchNSWCaselaw, COURT_RESOURCES, loginNSWRegistry, submitNSW2FA, scrapeRegistryCases, scrapeRegistryCaseDetail, closeRegistryBrowser } from './courtlink.js';
+import { searchNSWCaselaw, COURT_RESOURCES, loginNSWRegistry, submitNSW2FA, scrapeRegistryCases, scrapeRegistryCaseDetail, closeRegistryBrowser, getRegistryDebugState } from './courtlink.js';
 
 const PORT          = process.env.PORT || 4242;
 const ADMIN_PASSWORD = 'boob';
@@ -930,6 +930,8 @@ async function syncRegistry(){
       st.textContent='2FA accepted. Fetching cases…';
     } else if (!loginD.ok) {
       st.style.color='var(--red)'; st.textContent='Login error: '+(loginD.error||'failed');
+      if (loginD.log) console.log('[Registry login log]', loginD.log);
+      if (loginD.screenshot) { console.log('[Registry screenshot]', loginD.screenshot.slice(0,80)+'…'); window.open('/api/registry/debug','_blank'); }
       btn.disabled=false; btn.textContent='⟳ Sync Registry'; return;
     } else { st.textContent='Logged in. Fetching cases…'; }
 
@@ -963,15 +965,20 @@ async function syncRegistry(){
       const mn = (rc.matter_number||'').trim();
       if (mn && existingNums.has(mn)) { skipped++; continue; }
       // Map registry fields to our case format
+      const notes = [
+        rc.next_time ? 'Hearing time: '+rc.next_time : '',
+        rc.filed_date ? 'Filed: '+rc.filed_date : '',
+        rc.detail_url ? 'Registry: '+rc.detail_url : '',
+      ].filter(Boolean).join('\\n');
       const newCase = {
         title:         rc.title || rc.matter_number || 'Registry Case',
-        court:         rc.court || 'NSW Court',
+        court:         rc.court || 'NSW Local/District/Supreme Court',
         matter_number: rc.matter_number || '',
         status:        mapRegistryStatus(rc.status),
         next_date:     parseRegistryDate(rc.next_date),
-        notes:         rc.parties ? 'Parties: '+rc.parties : '',
+        notes,
         jurisdiction:  'nsw',
-        area_of_law:   '',
+        area_of_law:   'criminal',
       };
       await fetch('/api/cases', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(newCase)});
       added++;
@@ -1958,6 +1965,29 @@ const server = createServer(async (req, res) => {
   if (docDel && req.method==='DELETE') { deleteDocument(parseInt(docDel[2],10)); return jres(res,{ok:true}); }
 
   // ── NSW Registry ──
+  if (path==='/api/registry/debug') {
+    const state = await getRegistryDebugState();
+    // Serve a debug page with the screenshot + state
+    const scr = state.screenshot ? `<img src="${state.screenshot}" style="max-width:100%;border:1px solid #333;border-radius:6px">` : '<p style="color:#555">No screenshot</p>';
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Registry Debug</title>
+<style>body{background:#050505;color:#e8e8e8;font-family:monospace;padding:20px;font-size:13px}
+h2{color:#ff0099;margin-bottom:12px}pre{background:#0a0a0a;padding:12px;border-radius:6px;overflow:auto;font-size:11px;border:1px solid #1f1f1f;white-space:pre-wrap;word-break:break-all}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+</style></head><body>
+<h2>⚡ NSW Registry — Browser Debug State</h2>
+<div class="row">
+<div>
+<b>URL:</b><br><pre>${state.url||'none'}</pre>
+<b>Title:</b> ${state.title||'—'}<br><br>
+<b>Logged in:</b> ${state.loggedIn?'✓ YES':'✗ NO'}<br><br>
+<b>Inputs on page:</b><br><pre>${JSON.stringify(state.inputs,null,2)}</pre>
+<b>Page text (first 3000 chars):</b><br><pre>${(state.bodyText||'').replace(/</g,'&lt;')}</pre>
+</div>
+<div>${scr}</div>
+</div>
+</body></html>`;
+    res.writeHead(200, {'Content-Type':'text/html'}); res.end(html); return;
+  }
   if (path==='/api/registry/login' && req.method==='POST') {
     const { username, password } = JSON.parse(await body(req));
     const result = await loginNSWRegistry(username, password);

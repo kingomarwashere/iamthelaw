@@ -97,55 +97,118 @@ async function getRegistryPage() {
   return _registryPage;
 }
 
+export async function getRegistryDebugState() {
+  if (!_registryPage || _registryPage.isClosed()) return { error: 'No browser session open' };
+  const page = _registryPage;
+  const url   = page.url();
+  const title = await page.title().catch(() => '');
+  const bodyText = await page.evaluate(() => document.body?.innerText?.slice(0, 3000) || '').catch(() => '');
+  const inputs = await page.evaluate(() =>
+    [...document.querySelectorAll('input')].map(i => ({ id: i.id, name: i.name, type: i.type, visible: i.offsetParent !== null }))
+  ).catch(() => []);
+  const screenshot = await page.screenshot({ type: 'jpeg', quality: 60, fullPage: false }).catch(() => null);
+  return {
+    url, title, bodyText, inputs,
+    screenshot: screenshot ? 'data:image/jpeg;base64,' + screenshot.toString('base64') : null,
+    loggedIn: _registryLoggedIn,
+  };
+}
+
 export async function loginNSWRegistry(username, password) {
   const page = await getRegistryPage();
+  const log = [];
+  const step = (msg) => { log.push(msg); console.log('[Registry]', msg); };
+
   try {
-    await page.goto(SSO_LOGIN_URL, { waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForTimeout(2000);
-
-    // Already logged in?
-    if (!page.url().includes('sso/login') && !page.url().includes('okta')) {
-      _registryLoggedIn = true;
-      return { ok: true, message: 'Already logged in' };
-    }
-
-    const usernameInput = await page.$('#username');
-    if (!usernameInput) throw new Error('Login form not found — page may have changed');
-
-    await page.fill('#username', username);
-    await page.fill('#password', password);
-
-    const checked = await page.$eval('#termsAndConditions', el => el.checked).catch(() => false);
-    if (!checked) await page.click('#termsAndConditions');
-
-    await Promise.all([
-      page.waitForNavigation({ timeout: 30000 }),
-      page.click('#btn-login'),
-    ]);
+    step('Navigating to SSO login…');
+    await page.goto(SSO_LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(3000);
 
-    // Check for login error message
-    const errEl = await page.$('#custom-invalid-feedback, .infobox-error, [class*="error"]');
-    if (errEl) {
-      const errText = (await errEl.textContent() || '').trim();
-      if (errText) throw new Error('Login failed: ' + errText);
+    step('Landed on: ' + page.url());
+
+    // Already past login?
+    const url0 = page.url();
+    if (!url0.includes('sso/login') && !url0.includes('okta.com') && !url0.includes('/login')) {
+      _registryLoggedIn = true;
+      step('Already logged in');
+      return { ok: true, message: 'Already logged in', log };
     }
 
-    const url = page.url();
+    // Wait for form to be ready
+    await page.waitForSelector('#username', { timeout: 15000 }).catch(() => null);
+    const usernameInput = await page.$('#username');
+    if (!usernameInput) {
+      const bodySnip = await page.evaluate(() => document.body?.innerText?.slice(0, 500)).catch(() => '');
+      throw new Error(`Login form not found. Page text: ${bodySnip}`);
+    }
 
-    // Detect 2FA / MFA page
+    step('Filling username…');
+    await page.fill('#username', username);
+
+    step('Filling password…');
+    await page.fill('#password', password);
+
+    // T&C checkbox
+    const cbExists = await page.$('#termsAndConditions');
+    if (cbExists) {
+      const checked = await page.$eval('#termsAndConditions', el => el.checked).catch(() => false);
+      if (!checked) {
+        step('Checking T&C box…');
+        await page.click('#termsAndConditions');
+        await page.waitForTimeout(300);
+      }
+    }
+
+    step('Clicking Login button…');
+    await page.click('#btn-login');
+
+    // Wait for the full SAML redirect chain to settle.
+    // Flow: POST /sso/login → /cgi/samlauth → portal.dcj (Okta) → home.do
+    // We wait until we're no longer on any auth/redirect URL, or until an error appears.
+    step('Waiting for redirect chain…');
+    const isAuthUrl = (u) => u.includes('sso/login') || u.includes('/cgi/samlauth') || u.includes('okta.com') || u.includes('portal.dcj') || u.includes('/saml') || u.includes('/login');
+
+    const settled = await page.waitForURL(u => !isAuthUrl(u.toString()), { timeout: 30000 })
+      .then(() => true)
+      .catch(() => false);
+
+    await page.waitForTimeout(2000);
+    const url1 = page.url();
+    step('Settled URL: ' + url1);
+
+    // If waitForURL timed out, we may still be on login — check for error text
+    if (!settled || isAuthUrl(url1)) {
+      const errText = await page.evaluate(() => {
+        const sel = '#custom-invalid-feedback, .infobox-error, .error-message';
+        return [...document.querySelectorAll(sel)].map(el => el.textContent.trim()).filter(t => t.length > 2).join(' | ');
+      }).catch(() => '');
+      step('Still on auth page. Error text: ' + (errText || 'none'));
+      throw new Error(errText || 'Login failed — still on auth page after 30s. Check username/password.');
+    }
+
+    // Check for 2FA
     const mfaDetected = await _detectMFA(page);
     if (mfaDetected) {
-      return { ok: false, needs_2fa: true, mfa_type: mfaDetected, message: '2FA required' };
+      step('2FA detected: ' + mfaDetected);
+      const screenshot = await page.screenshot({ type: 'jpeg', quality: 60 }).catch(() => null);
+      return {
+        ok: false, needs_2fa: true, mfa_type: mfaDetected,
+        message: '2FA required', log,
+        screenshot: screenshot ? 'data:image/jpeg;base64,' + screenshot.toString('base64') : null,
+      };
     }
 
-    if (url.includes('sso/login') || url.includes('okta')) throw new Error('Login failed — check username and password');
-
     _registryLoggedIn = true;
-    return { ok: true, message: 'Logged in', url };
+    step('Login successful');
+    return { ok: true, message: 'Logged in', url: url1, log };
   } catch (e) {
     _registryLoggedIn = false;
-    return { ok: false, error: e.message };
+    step('EXCEPTION: ' + e.message);
+    const screenshot = await page.screenshot({ type: 'jpeg', quality: 60 }).catch(() => null);
+    return {
+      ok: false, error: e.message, log,
+      screenshot: screenshot ? 'data:image/jpeg;base64,' + screenshot.toString('base64') : null,
+    };
   }
 }
 
@@ -214,116 +277,142 @@ export async function submitNSW2FA(code) {
 export async function scrapeRegistryCases(partyName) {
   if (!_registryLoggedIn) return { ok: false, error: 'Not logged in to NSW Registry' };
   const page = _registryPage;
-  const results = [];
 
   try {
-    // Navigate to the home page and find party/case search
-    await page.goto(`${REGISTRY_BASE}/home.do`, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(2000);
+    // Navigate to the "Search cases" page on the content site
+    // The logged-in portal is at /content/landing — case search is under /content/case-search
+    // or accessible via the "Search cases" nav link
+    const SEARCH_URLS = [
+      'https://onlineregistry.lawlink.nsw.gov.au/content/case-search',
+      'https://onlineregistry.lawlink.nsw.gov.au/content/search-cases',
+      'https://onlineregistry.lawlink.nsw.gov.au/content/my-cases',
+    ];
 
-    // If we got bounced to login, session expired
-    if (page.url().includes('sso/login')) {
-      _registryLoggedIn = false;
-      return { ok: false, error: 'Session expired — please log in again' };
-    }
+    // First: navigate to landing and find the "Search cases" link
+    await page.goto('https://onlineregistry.lawlink.nsw.gov.au/content/landing', { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.waitForTimeout(1500);
 
-    // Find the search nav link — try several common patterns
-    const searchLink = await page.evaluate(() => {
+    if (page.url().includes('sso/login')) { _registryLoggedIn = false; return { ok: false, error: 'Session expired' }; }
+
+    // Find "Search cases" nav link
+    const searchCasesHref = await page.evaluate(() => {
       const links = [...document.querySelectorAll('a')];
-      const byText = (t) => links.find(a => a.textContent.toLowerCase().includes(t));
-      const match = byText('party search') || byText('search by party') || byText('case search') || byText('search cases') || byText('search');
-      return match ? match.href : null;
+      const m = links.find(a => /^search\s*cases?$/i.test(a.textContent.trim()) || a.textContent.trim().toLowerCase() === 'search cases');
+      return m?.href || null;
     });
 
-    // Also try direct known URL patterns for the registry
-    const searchUrls = [
-      searchLink,
-      `${REGISTRY_BASE}/orwSecDisplaySearchCaseByPartyName.do`,
-      `${REGISTRY_BASE}/orwSecDisplaySearchByParty.do`,
-      `${REGISTRY_BASE}/orwSecDisplayCaseSearch.do`,
-      `${REGISTRY_BASE}/orwSecDisplaySearchCases.do`,
-    ].filter(Boolean);
+    const targetUrl = searchCasesHref || `${REGISTRY_BASE}/caseListSubmenu.do`;
+    console.log('[Registry] Search cases URL:', targetUrl);
 
-    let searchPageFound = false;
-    for (const url of searchUrls) {
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
-      await page.waitForTimeout(1500);
-      if (page.url().includes('sso/login')) { _registryLoggedIn = false; return { ok: false, error: 'Session expired' }; }
-      const hasInput = await page.$('input[name*="party"], input[name*="Party"], input[name*="name"], input[name*="Name"], input[placeholder*="name"], input[placeholder*="party"]');
-      if (hasInput) { searchPageFound = true; break; }
-    }
+    await page.goto(targetUrl, { waitUntil: 'load', timeout: 45000 });
+    await page.waitForTimeout(3000);
 
-    if (!searchPageFound) {
-      // Fallback: dump all nav links from home for debugging
-      await page.goto(`${REGISTRY_BASE}/home.do`, { waitUntil: 'domcontentloaded', timeout: 20000 });
-      const navLinks = await page.evaluate(() =>
-        [...document.querySelectorAll('a')].map(a => ({ text: a.textContent.trim().slice(0, 60), href: a.href.slice(0, 120) })).filter(a => a.href && a.text && a.href.includes('eservices'))
-      );
-      return { ok: false, error: 'Could not find party search page', debug: { navLinks } };
-    }
+    if (page.url().includes('sso/login')) { _registryLoggedIn = false; return { ok: false, error: 'Session expired' }; }
 
-    // Fill party name and search
-    const nameInput = await page.$('input[name*="party"], input[name*="Party"], input[name*="surname"], input[name*="name"]:not([name*="user"])');
-    if (!nameInput) return { ok: false, error: 'Party name input not found on search page' };
+    const pageUrl = page.url();
+    console.log('[Registry] On search page:', pageUrl);
 
-    await nameInput.fill(partyName);
+    // Dump all form inputs for debugging
+    const formInfo = await page.evaluate(() => ({
+      inputs: [...document.querySelectorAll('input,select')].map(i => ({ tag: i.tagName, name: i.name, id: i.id, type: i.type, placeholder: i.placeholder, value: i.value })),
+      buttons: [...document.querySelectorAll('button,input[type=submit]')].map(b => ({ text: b.textContent?.trim(), type: b.type, id: b.id })),
+      pageText: document.body.innerText.slice(0, 500),
+    }));
+    console.log('[Registry] Form info:', JSON.stringify(formInfo, null, 2));
 
-    // Submit the form
-    const submitBtn = await page.$('button[type=submit], input[type=submit], button:has-text("Search"), a:has-text("Search")');
+    // Submit the search with empty fields to list all user's cases
+    const submitBtn = await page.$('button[type=submit], input[type=submit], button:has-text("Search")');
     if (submitBtn) {
-      await Promise.all([page.waitForNavigation({ timeout: 20000 }).catch(() => {}), submitBtn.click()]);
+      await Promise.all([
+        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {}),
+        submitBtn.click(),
+      ]);
+      await page.waitForTimeout(2000);
     } else {
-      await page.keyboard.press('Enter');
-      await page.waitForTimeout(3000);
-    }
-    await page.waitForTimeout(2000);
-
-    // Parse search results — registry typically shows a table
-    const cases = await page.evaluate((name) => {
-      const rows = [...document.querySelectorAll('table tr, .case-row, .result-row, li.case')];
-      const out = [];
-      rows.forEach((row, i) => {
-        if (i === 0) return; // skip header
-        const cells = [...row.querySelectorAll('td, th')];
-        if (!cells.length) return;
-        const text = row.textContent.trim();
-        if (!text || text.length < 10) return;
-        // Extract links for case detail URLs
-        const link = row.querySelector('a');
-        const entry = {
-          raw: cells.map(c => c.textContent.trim()),
-          href: link?.href || '',
-        };
-        out.push(entry);
-      });
-      return out;
-    }, partyName);
-
-    // Parse the raw cell data into structured cases
-    for (const row of cases) {
-      const cells = row.raw;
-      if (!cells.length) continue;
-      results.push({
-        matter_number: cells[0] || '',
-        title:         cells[1] || cells[0] || '',
-        court:         cells[2] || '',
-        status:        cells[3] || '',
-        next_date:     cells[4] || '',
-        parties:       cells[5] || '',
-        detail_url:    row.href || '',
-        raw_cells:     cells,
-      });
+      // Try pressing Enter in any input
+      const anyInput = await page.$('input[type=text], input[type=search]');
+      if (anyInput) { await anyInput.press('Enter'); await page.waitForTimeout(3000); }
     }
 
-    // If no table rows, try to grab any visible case-like content
-    if (!results.length) {
-      const pageText = await page.evaluate(() => document.body.innerText.slice(0, 5000));
-      return { ok: true, cases: [], rawText: pageText, message: 'No results found or page format unrecognised' };
+    console.log('[Registry] After search submit:', page.url());
+
+    // Grab full page text and extract cases
+    const rawText = await page.evaluate(() => document.body.innerText);
+
+    // Try to parse structured case data from tables or cards
+    const rawCases = await page.evaluate(() => {
+      // Strategy 1: table rows
+      const tableRows = [...document.querySelectorAll('table tbody tr, table tr:not(:first-child)')];
+      if (tableRows.length) {
+        return tableRows.map(row => {
+          const cells = [...row.querySelectorAll('td')];
+          const link = row.querySelector('a');
+          return { cells: cells.map(c => c.textContent.trim()), href: link?.href || '' };
+        }).filter(r => r.cells.length > 1);
+      }
+
+      // Strategy 2: card/list items that look like cases
+      const cards = [...document.querySelectorAll('[class*="case"], [class*="matter"], [class*="result"], li.item, .card')];
+      if (cards.length) {
+        return cards.map(card => ({
+          cells: [card.textContent.trim().slice(0, 200)],
+          href: card.querySelector('a')?.href || '',
+        }));
+      }
+
+      // Strategy 3: look for links with case numbers (pattern: 4 digits / number)
+      const caseLinks = [...document.querySelectorAll('a')].filter(a => /\d{4}\s*\/\s*\d+/.test(a.textContent) || /\d{4}\s*\/\s*\d+/.test(a.href));
+      if (caseLinks.length) {
+        return caseLinks.map(a => ({
+          cells: [a.textContent.trim(), a.closest('tr,li,div')?.textContent.trim().slice(0, 200) || ''],
+          href: a.href,
+        }));
+      }
+
+      return [];
+    });
+
+    console.log('[Registry] Raw cases found:', rawCases.length);
+
+    if (!rawCases.length) {
+      return { ok: true, cases: [], rawText: rawText.slice(0, 5000), message: 'Logged in and searched but no cases found (empty list or unrecognised format)', pageUrl: page.url() };
     }
 
-    return { ok: true, cases: results };
+    // Map to structured format
+    // Observed column order: [matter_number, title, next_hearing (date+time+type), filed_date, ...]
+    const clean = s => (s || '').replace(/\s+/g, ' ').trim();
+    const cases = rawCases.map(row => {
+      const cells = row.cells;
+      const matter_number = (cells[0] || '').trim();
+      const title         = clean(cells[1]) || matter_number;
+      // cells[2] = next hearing: e.g. "18 Sep. 2026 09:30 AM - Hearing"
+      const hearingRaw    = clean(cells[2] || '');
+      const hearingDateM  = hearingRaw.match(/(\d{1,2}\s+\w+\.?\s+\d{4})/);
+      const hearingTime   = hearingRaw.match(/(\d{1,2}:\d{2}\s*[AP]M)/i)?.[1] || '';
+      const hearingType   = hearingRaw.match(/[-–]\s*(.+)$/)?.[1]?.trim() || '';
+      const next_date_str = hearingDateM ? hearingDateM[1].trim() : '';
+      // cells[3] = filed/added date
+      const filed_date    = clean(cells[3] || '');
+      return {
+        matter_number,
+        title,
+        court:      '',  // not in table; can be fetched from detail URL
+        status:     hearingType || 'active',
+        next_date:  next_date_str,
+        next_time:  hearingTime,
+        filed_date,
+        detail_url: row.href || '',
+        raw:        cells,
+      };
+    });
+
+    return { ok: true, cases };
   } catch (e) {
-    return { ok: false, error: e.message };
+    const screenshot = await page.screenshot({ type: 'jpeg', quality: 60 }).catch(() => null);
+    return {
+      ok: false, error: e.message,
+      screenshot: screenshot ? 'data:image/jpeg;base64,' + screenshot.toString('base64') : null,
+    };
   }
 }
 
