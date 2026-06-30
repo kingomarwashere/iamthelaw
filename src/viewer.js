@@ -7,7 +7,7 @@ import { createServer } from 'http';
 import { getDb, stats } from './db.js';
 import { readStatus } from './status.js';
 import { AREAS, getArea, corpusSearch, situationIntake, buildArgument, summariseCase } from './research.js';
-import { modelStatus, setKey, getKeys as gk, MODELS, DEFAULT_MODEL } from './ai.js';
+import { modelStatus, setKey, getKeys as gk, MODELS, DEFAULT_MODEL, streamChat } from './ai.js';
 import { initCasesTables, getCases, getCase, createCase, updateCase, deleteCase, upsertTask, deleteTask, addEvent, deleteEvent, addDocument, toggleDocument, deleteDocument, TASK_TEMPLATES } from './cases.js';
 import { searchNSWCaselaw, COURT_RESOURCES, loginNSWRegistry, submitNSW2FA, scrapeRegistryCases, scrapeRegistryCaseDetail, closeRegistryBrowser, getRegistryDebugState } from './courtlink.js';
 
@@ -335,6 +335,24 @@ aside{background:var(--s1);border-right:1px solid var(--bd);overflow-y:auto;padd
 .admerr{font-size:12px;color:var(--red);min-height:16px;margin-bottom:10px}
 .admbtns{display:flex;gap:8px}
 
+/* Case plan modal */
+#plan-modal{position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:200;display:none;flex-direction:column}
+#plan-modal.open{display:flex}
+.plan-hd{background:var(--s1);border-bottom:1px solid var(--bd);padding:12px 20px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+.plan-hd h2{font-size:14px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;flex:1}
+.plan-hd .plan-status{font-size:11px;color:var(--t3);letter-spacing:.05em}
+.plan-body{flex:1;overflow-y:auto;padding:28px;max-width:900px;width:100%;margin:0 auto}
+.plan-out{font-size:13px;line-height:1.85;color:var(--t2)}
+.plan-out h1,.plan-out h2{color:var(--accent);font-size:14px;text-transform:uppercase;letter-spacing:.1em;margin:24px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--bd)}
+.plan-out h3{color:var(--text);font-size:13px;margin:16px 0 6px;font-weight:700}
+.plan-out strong,.plan-out b{color:var(--text);font-weight:700}
+.plan-out ul,.plan-out ol{padding-left:20px;margin:8px 0}
+.plan-out li{margin-bottom:5px}
+.plan-out code{background:var(--s2);padding:1px 6px;border-radius:3px;font-size:12px;color:var(--accent)}
+.plan-out blockquote{border-left:3px solid var(--accent);padding-left:14px;color:var(--t3);margin:10px 0}
+.plan-out a{color:var(--accent)}
+.plan-actions{background:var(--s1);border-top:1px solid var(--bd);padding:12px 20px;display:flex;gap:8px;flex-shrink:0}
+
 /* settings panel */
 #setpanel{position:fixed;right:0;top:0;bottom:0;width:380px;background:var(--s1);border-left:1px solid var(--bd);z-index:150;display:none;flex-direction:column;box-shadow:-20px 0 60px rgba(0,0,0,.5)}
 #setpanel.open{display:flex}
@@ -588,6 +606,22 @@ const HTML = `<!DOCTYPE html>
 </div>
 
 <!-- Settings panel -->
+<!-- Case Plan Modal -->
+<div id="plan-modal">
+  <div class="plan-hd">
+    <h2 id="plan-modal-title">⚡ Case Plan</h2>
+    <span class="plan-status" id="plan-status">Generating…</span>
+    <button class="bg" style="padding:4px 10px;font-size:11px" onclick="closePlanModal()">✕ Close</button>
+  </div>
+  <div class="plan-body">
+    <div class="plan-out" id="plan-out"></div>
+  </div>
+  <div class="plan-actions" id="plan-actions" style="display:none">
+    <button class="blink" style="font-size:12px;padding:6px 16px" onclick="importPlanTasks()">+ Import checklist as tasks</button>
+    <button class="bg" style="font-size:12px;padding:6px 12px" onclick="closePlanModal()">Close</button>
+  </div>
+</div>
+
 <div id="setpanel">
   <div class="seth">
     <strong>⚙ Settings — API Keys</strong>
@@ -737,6 +771,7 @@ async function loadCaseDetail(id) {
         <h2>\${esc(c.title)}<span class="cc-badge badge-\${c.status}" style="margin-left:8px">\${STATUS_LABELS[c.status]||c.status}</span></h2>
         <div style="font-size:11px;color:var(--t3)">\${pct}% · \${done}/\${c.tasks.length} tasks · \${c.area_of_law?AREA_LABELS[c.area_of_law]:''}</div>
         <div style="margin-left:auto;display:flex;gap:6px">
+          <button class="blink" style="font-size:11px;padding:4px 14px;letter-spacing:.06em" onclick="buildCasePlan(\${c.id})">⚡ Build Case Plan</button>
           <button class="bg" style="font-size:11px;padding:4px 10px" onclick="showEditCase(\${c.id})">Edit</button>
           <button class="bg" style="font-size:11px;padding:4px 10px;color:var(--red);border-color:var(--red)" onclick="deleteCaseConfirm(\${c.id})">Delete</button>
         </div>
@@ -1095,6 +1130,95 @@ function researchThisCase(){
     if(d.jurisdiction)$('rpjur').value=d.jurisdiction;
     if(d.area_of_law)$('rparea').value=d.area_of_law;
   });
+}
+
+// ── Case Plan ─────────────────────────────────────────────────────────────────
+let _planMarkdown = '';
+let _planCaseId   = null;
+
+function closePlanModal() { $('plan-modal').classList.remove('open'); }
+
+async function buildCasePlan(id) {
+  _planCaseId = id;
+  _planMarkdown = '';
+  const modal = $('plan-modal');
+  modal.classList.add('open');
+  $('plan-out').innerHTML = '<span class="cursor"></span>';
+  $('plan-actions').style.display = 'none';
+  $('plan-status').textContent = 'Gathering case data…';
+  $('plan-status').style.color = 'var(--amber)';
+
+  // Get case title for modal heading
+  try {
+    const c = await (await fetch('/api/cases/'+id)).json();
+    $('plan-modal-title').textContent = '⚡ ' + (c.title||'Case Plan');
+  } catch {}
+
+  $('plan-status').textContent = 'Searching corpus & building plan…';
+
+  try {
+    const r = await fetch('/api/cases/'+id+'/plan', { method:'POST' });
+    if (!r.ok) {
+      const d = await r.json().catch(()=>({}));
+      $('plan-out').innerHTML = '<span style="color:var(--red)">' + esc(d.error||'Error generating plan') + '</span>';
+      $('plan-status').textContent = 'Error'; $('plan-status').style.color='var(--red)'; return;
+    }
+
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream:true });
+      const lines = buf.split('\\n'); buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        const d = JSON.parse(line.slice(5));
+        if (d.type === 'chunk') {
+          _planMarkdown += d.text;
+          $('plan-out').innerHTML = renderMD(_planMarkdown) + '<span class="cursor"></span>';
+          $('plan-out').scrollTop = $('plan-out').scrollHeight;
+        }
+        if (d.type === 'done') {
+          $('plan-out').innerHTML = renderMD(_planMarkdown);
+          $('plan-status').textContent = 'Done ✓'; $('plan-status').style.color='var(--green)';
+          $('plan-actions').style.display = 'flex';
+        }
+        if (d.type === 'error') {
+          $('plan-out').innerHTML += '<span style="color:var(--red)">\\n\\n' + esc(d.error) + '</span>';
+          $('plan-status').textContent = 'Error'; $('plan-status').style.color='var(--red)';
+        }
+      }
+    }
+  } catch(e) {
+    $('plan-out').innerHTML = '<span style="color:var(--red)">' + esc(e.message) + '</span>';
+    $('plan-status').textContent = 'Error'; $('plan-status').style.color='var(--red)';
+  }
+}
+
+async function importPlanTasks() {
+  if (!_planCaseId || !_planMarkdown) return;
+  // Extract checkbox/list items from markdown as tasks
+  const lines = _planMarkdown.split('\\n');
+  const tasks = [];
+  for (const line of lines) {
+    const m = line.match(/^[-*]\\s+(?:\\[[ x]\\]\\s+)?(.+)$/i);
+    if (m) {
+      const title = m[1].replace(/\*\*/g,'').trim();
+      if (title.length > 4 && title.length < 200) tasks.push(title);
+    }
+  }
+  if (!tasks.length) { alert('No checklist items found to import.'); return; }
+  let added = 0;
+  for (const title of tasks) {
+    await fetch('/api/cases/'+_planCaseId+'/tasks', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ title, category:'action' })
+    });
+    added++;
+  }
+  closePlanModal();
+  loadCaseDetail(_planCaseId);
 }
 
 // Add case modal
@@ -2173,6 +2297,114 @@ const server = createServer(async (req, res) => {
   if (docToggle && req.method==='POST') { toggleDocument(parseInt(docToggle[2],10)); return jres(res,{ok:true}); }
   const docDel = path.match(/^\/api\/cases\/(\d+)\/documents\/(\d+)$/);
   if (docDel && req.method==='DELETE') { deleteDocument(parseInt(docDel[2],10)); return jres(res,{ok:true}); }
+
+  // ── Case Plan ─────────────────────────────────────────────────────────────
+  const planMatch = path.match(/^\/api\/cases\/(\d+)\/plan$/);
+  if (planMatch && req.method === 'POST') {
+    const caseId = parseInt(planMatch[1], 10);
+    const c = getCase(caseId);
+    if (!c) return jres(res, { error: 'Case not found' }, 404);
+
+    // Search corpus for relevant cases and legislation
+    const searchTerms = [
+      c.title,
+      [c.area_of_law, c.jurisdiction].filter(Boolean).join(' '),
+      ...(c.notes || '').split(/\s+/).filter(w => w.length > 6).slice(0, 5),
+    ].filter(Boolean);
+
+    const corpusResults = [];
+    const seen = new Set();
+    for (const term of searchTerms.slice(0, 3)) {
+      try {
+        const rows = db.prepare(`
+          SELECT d.id, d.title, d.url, d.type, d.jurisdiction, d.pub_date,
+                 snippet(documents_fts,2,'','','…',40) AS snip
+          FROM documents_fts f JOIN documents d ON d.id=f.rowid
+          WHERE documents_fts MATCH ? ORDER BY rank LIMIT 6
+        `).all(term);
+        for (const r of rows) {
+          if (!seen.has(r.id)) { seen.add(r.id); corpusResults.push(r); }
+        }
+      } catch {}
+    }
+
+    const caseEntries  = corpusResults.filter(r => r.type === 'case_law').slice(0, 8);
+    const legisEntries = corpusResults.filter(r => r.type === 'legislation').slice(0, 5);
+
+    // Build the prompt
+    const fmt = v => v || '—';
+    const taskList = c.tasks.map((t,i) => `  ${i+1}. [${t.done?'x':' '}] ${t.title}${t.due_date?' (due '+t.due_date+')':''}${t.description?'\n     '+t.description:''}`).join('\n') || '  None yet.';
+    const eventList = c.events.map(e => `  - [${e.event_date||'?'}] ${e.event_type.toUpperCase()}: ${e.title}${e.description?' — '+e.description:''}`).join('\n') || '  None yet.';
+    const docList = c.documents.map(d => `  - [${d.status==='have'?'✓':'✗'}] ${d.title}`).join('\n') || '  None yet.';
+    const caseSnippets = caseEntries.map(r => `  - ${r.title} (${r.jurisdiction?.toUpperCase()||'?'}, ${r.pub_date?.slice(0,4)||'?'})\n    ${r.snip||''}`).join('\n');
+    const legisSnippets = legisEntries.map(r => `  - ${r.title}`).join('\n');
+
+    const prompt = `You are an expert Australian legal advisor helping a self-represented litigant prepare their case strategy.
+
+## CASE DETAILS
+- **Title:** ${fmt(c.title)}
+- **Court:** ${fmt(c.court)}
+- **Matter number:** ${fmt(c.matter_number)}
+- **Area of law:** ${fmt(c.area_of_law)}
+- **Jurisdiction:** ${fmt(c.jurisdiction?.toUpperCase())}
+- **Status:** ${fmt(c.status)}
+- **Next court date:** ${fmt(c.next_date)}
+- **Notes:**
+${c.notes ? c.notes.split('\n').map(l => '  ' + l).join('\n') : '  None.'}
+
+## CURRENT TASKS
+${taskList}
+
+## TIMELINE / EVENTS
+${eventList}
+
+## DOCUMENTS & EVIDENCE
+${docList}
+
+## RELEVANT CASES FOUND IN CORPUS
+${caseSnippets || '  None found.'}
+
+## RELEVANT LEGISLATION FOUND IN CORPUS
+${legisSnippets || '  None found.'}
+
+---
+
+Based on ALL of the above, produce a comprehensive case plan. Be specific to THIS case — use the actual matter number, court, dates, and parties from the case details above. Structure your response as follows:
+
+## Case Overview
+Summarise what this case is about and its current stage. Be specific.
+
+## Key Legal Issues
+The specific legal questions that need to be resolved and the relevant law.
+
+## Key People to Identify
+- **Magistrate/Judge:** Who is likely presiding based on the court and matter. How to find out their name and background.
+- **Prosecutor/Opposing party:** Who they are (from the case title), their typical approach, what to expect.
+- **Any other key parties** (registrar, legal representatives, witnesses).
+
+## Orders to Seek
+Specific orders or relief to apply for in this case, with the legal basis for each.
+
+## Pre-Hearing Strategy
+Concrete steps to take before the next court date.
+
+## At the Hearing
+Exactly what to do, say, and bring on the day.
+
+## Action Checklist
+A detailed numbered checklist of every action item, in priority order. Mark urgent items clearly.
+
+Keep the tone practical, direct, and empowering for someone representing themselves.`;
+
+    stream(res);
+    try {
+      const gen = streamChat([{ role:'user', content: prompt }], DEFAULT_MODEL,
+        'You are an expert Australian legal strategy advisor. Be specific, practical, and thorough. Format with markdown headers and checklists.');
+      for await (const chunk of gen) { sse(res, { type:'chunk', text:chunk }); }
+      sse(res, { type:'done' }); res.end();
+    } catch(e) { try { sse(res, { type:'error', error:e.message }); res.end(); } catch {} }
+    return;
+  }
 
   // ── NSW Registry ──
   if (path==='/api/registry/status') {
