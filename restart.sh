@@ -11,11 +11,11 @@ NODE=/Users/maverick/.local/bin/node
 pkill -9 -f "node.*viewer\.js" 2>/dev/null
 
 # Belt-and-suspenders: kill anything on port 4242
-lsof -ti :4242 | xargs kill -9 2>/dev/null
+/usr/sbin/lsof -ti :4242 | xargs kill -9 2>/dev/null
 
 # Wait until port is actually free (up to 8s)
 for i in 1 2 3 4 5 6 7 8; do
-  lsof -ti :4242 >/dev/null 2>&1 || break
+  /usr/sbin/lsof -ti :4242 >/dev/null 2>&1 || break
   sleep 1
 done
 
